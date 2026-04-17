@@ -1,0 +1,18 @@
+title = "advanced-troubleshooter gitleaks config"
+
+# Extend gitleaks' built-in default rules rather than replacing them, so
+# every upstream rule (github-pat, openai, slack-token, ...) still fires
+# outside of the paths we explicitly allowlist below.
+[extend]
+useDefaultConfig = true
+
+# Tenant-loader tests embed PAT-shaped and LLM-key-shaped fixture strings
+# to verify that our own config loader's secret-scan catches raw secrets
+# at load time. Those strings are never real credentials — they exist
+# only to exercise the pattern matcher — so they must be exempted from
+# the global scan to keep the test honest.
+[allowlist]
+description = "pattern-test fixtures in our own secret-scan tests"
+paths = [
+  '''packages/server/src/config/tenants\.test\.ts''',
+]
