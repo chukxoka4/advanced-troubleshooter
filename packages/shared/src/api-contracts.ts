@@ -2,12 +2,20 @@ import { z } from "zod";
 
 /**
  * API request/response contracts shared between the server and the frontend.
- *
- * Intentionally empty for now: schemas are added alongside the routes that
- * validate against them (chat in commit #25, issue draft/create in Phase 3).
- * Keeping the file present with Zod imported means later commits only add
- * exports — they never have to first wire up the module.
+ * Schemas are added alongside the routes that validate against them.
  */
 
-export const _reservedForFutureContracts = z.object({});
-export type _ReservedForFutureContracts = z.infer<typeof _reservedForFutureContracts>;
+export const HealthCheckResultSchema = z.enum(["ok", "degraded"]);
+export type HealthCheckResult = z.infer<typeof HealthCheckResultSchema>;
+
+export const HealthResponseSchema = z.object({
+  status: HealthCheckResultSchema,
+  version: z.string(),
+  gitSha: z.string().nullable(),
+  appMode: z.enum(["prototype", "production"]),
+  uptimeMs: z.number().int().nonnegative(),
+  checks: z.object({
+    database: HealthCheckResultSchema,
+  }),
+});
+export type HealthResponse = z.infer<typeof HealthResponseSchema>;
