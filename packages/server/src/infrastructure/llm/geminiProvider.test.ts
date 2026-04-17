@@ -1,0 +1,75 @@
+import { describe, expect, it, vi } from "vitest";
+import { createGeminiProvider } from "./geminiProvider.js";
+import { SpendCapExceededError } from "./types.js";
+
+function okResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("geminiProvider", () => {
+  it("sends the system prompt via systemInstruction, translates assistant→model", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        candidates: [{ content: { parts: [{ text: "ok" }] } }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      }),
+    );
+    const provider = createGeminiProvider({
+      apiKey: "key",
+      model: "gemini-1.5-pro",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await provider.sendMessage({
+      systemPrompt: "be helpful",
+      history: [{ role: "assistant", content: "prior" }],
+      userMessage: "hi",
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/v1beta/models/gemini-1.5-pro:generateContent");
+    const body = JSON.parse(init.body as string);
+    expect(body.systemInstruction.parts[0].text).toBe("be helpful");
+    const roles = body.contents.map((c: { role: string }) => c.role);
+    expect(roles).toEqual(["model", "user"]);
+    expect(roles).not.toContain("system");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["x-goog-api-key"]).toBe("key");
+  });
+
+  it("enforces the daily spend cap", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        candidates: [{ content: { parts: [{ text: "ok" }] } }],
+        usageMetadata: { promptTokenCount: 5_000_000, candidatesTokenCount: 5_000_000 },
+      }),
+    );
+    const provider = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini",
+      dailySpendCapUsd: 2,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" });
+    await expect(
+      provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "again" }),
+    ).rejects.toBeInstanceOf(SpendCapExceededError);
+  });
+
+  it("throws on non-2xx", async () => {
+    const fetchImpl = vi.fn(async () => new Response("boom", { status: 400 }));
+    const provider = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(
+      provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" }),
+    ).rejects.toThrow(/gemini api 400/);
+  });
+});
