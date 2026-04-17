@@ -44,10 +44,14 @@ async function main(): Promise<void> {
   }
   const args = parseArgs(process.argv.slice(2));
 
+  const pepper = process.env.API_KEY_PEPPER;
+  if (!pepper || pepper.length < 32) {
+    throw new Error("API_KEY_PEPPER (>=32 chars) is required");
+  }
   const pool = createDatabasePool(databaseUrl);
   try {
     const repo = createApiKeyRepository(pool);
-    const service = createApiKeyService({ repository: repo });
+    const service = createApiKeyService({ repository: repo, pepper });
     const { plaintext, row } = await service.generate({
       tenantId: args.tenant,
       ...(args.label ? { label: args.label } : {}),

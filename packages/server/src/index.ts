@@ -47,7 +47,14 @@ async function main(): Promise<void> {
   const conversationRepo = createConversationRepository(db);
   const analyticsRepo = createAnalyticsRepository(db);
   const apiKeyRepo = createApiKeyRepository(db);
-  const apiKeyService = createApiKeyService({ repository: apiKeyRepo });
+  const pepper = process.env.API_KEY_PEPPER;
+  if (!isPrototype() && (!pepper || pepper.length < 32)) {
+    throw new Error("API_KEY_PEPPER (>=32 chars) is required in production");
+  }
+  const apiKeyService = createApiKeyService({
+    repository: apiKeyRepo,
+    pepper: pepper ?? "prototype-only-pepper-not-for-production-use",
+  });
   const githubMcp = createGithubMcpClient();
   const llmFactory = createLlmFactory();
   const aiService = createAiService({
@@ -59,7 +66,29 @@ async function main(): Promise<void> {
   const verifyApiKey = resolveVerifyApiKey(apiKeyService);
   const startedAt = Date.now();
 
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: {
+      // Defence in depth: tenant objects carry provider keys and GitHub
+      // tokens. No current call site logs them, but redacting at the
+      // logger level means a future `req.log.info({ tenant })` cannot
+      // leak secrets in structured logs.
+      redact: {
+        paths: [
+          "tenant.ai.apiKey",
+          "*.ai.apiKey",
+          "tenant.repos[*].githubToken",
+          "*.repos[*].githubToken",
+          "*.apiKey",
+          "*.githubToken",
+          "authorization",
+          "*.authorization",
+          'headers["authorization"]',
+          'headers["x-api-key"]',
+        ],
+        censor: "[redacted]",
+      },
+    },
+  });
   registerGlobalErrorHandler(app);
 
   await app.register(

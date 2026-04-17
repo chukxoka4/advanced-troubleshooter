@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import type { ApiKeyRepository, ApiKeyRow } from "../repositories/apiKey.repository.js";
 
 /**
@@ -18,11 +18,20 @@ import type { ApiKeyRepository, ApiKeyRow } from "../repositories/apiKey.reposit
  * The service never logs plaintext and never returns plaintext from any
  * method other than generate(). Callers must treat the plaintext as
  * write-once and forward it to the operator exactly once.
+ *
+ * Stored form is HMAC-SHA256(pepper, plaintext). The pepper is a
+ * process-held secret (API_KEY_PEPPER env var) that is NOT in the
+ * database; an attacker who dumps the api_keys table still cannot brute
+ * force plaintexts without also compromising the application environment.
+ * A password-hashing KDF (argon2id/scrypt) would add a work factor on top
+ * of that, at the cost of a new dependency and a per-request CPU hit; the
+ * 256-bit entropy in each plaintext makes the work factor less critical
+ * than the pepper does. If that trade-off changes, swap `createHmac`
+ * here for a KDF and re-mint keys — the repository column is unchanged.
  */
 
 const KEY_PREFIX = "ats_";
 const KEY_ENTROPY_BYTES = 32;
-const HASH_ALGO = "sha256";
 
 export interface GenerateApiKeyInput {
   tenantId: string;
@@ -42,6 +51,13 @@ export interface ApiKeyService {
 
 export interface ApiKeyServiceDeps {
   repository: ApiKeyRepository;
+  /**
+   * Process-held pepper (NOT persisted). In production this comes from
+   * API_KEY_PEPPER. Tests pass an explicit value. A missing pepper in
+   * production throws at boot rather than silently falling back to an
+   * unpeppered hash.
+   */
+  pepper: string;
   randomBytesImpl?: (n: number) => Buffer;
 }
 
@@ -49,44 +65,35 @@ function base64Url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function hashPlaintext(plaintext: string): string {
-  return createHash(HASH_ALGO).update(plaintext, "utf8").digest("hex");
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
+function pepperedHash(pepper: string, plaintext: string): string {
+  return createHmac("sha256", pepper).update(plaintext, "utf8").digest("hex");
 }
 
 export function createApiKeyService(deps: ApiKeyServiceDeps): ApiKeyService {
+  if (!deps.pepper || deps.pepper.length < 32) {
+    throw new Error(
+      "apiKeyService: pepper must be at least 32 characters (set API_KEY_PEPPER)",
+    );
+  }
   const rand = deps.randomBytesImpl ?? ((n: number) => randomBytes(n));
+  const hash = (plaintext: string): string => pepperedHash(deps.pepper, plaintext);
 
   return {
     async generate({ tenantId, label }) {
       if (!tenantId) throw new Error("apiKeyService.generate: tenantId is required");
       const plaintext = `${KEY_PREFIX}${base64Url(rand(KEY_ENTROPY_BYTES))}`;
-      const keyHash = hashPlaintext(plaintext);
+      const keyHash = hash(plaintext);
       const row = await deps.repository.storeKeyHash({ tenantId, keyHash, ...(label ? { label } : {}) });
       return { plaintext, row };
     },
 
     async verify(presented) {
       if (!presented || !presented.startsWith(KEY_PREFIX)) return null;
-      const digest = hashPlaintext(presented);
+      const digest = hash(presented);
       const row = await deps.repository.findByKeyHash(digest);
-      if (!row) return null;
-      // Defence in depth: the repository already matched by digest, but we
-      // re-compare with a constant-time check to avoid leaking information
-      // through any future non-constant-time storage lookup.
-      const stored = hashPlaintext(presented);
-      if (!constantTimeEqual(stored, digest)) return null;
-      return row;
+      return row ?? null;
     },
 
-    hash(plaintext) {
-      return hashPlaintext(plaintext);
-    },
+    hash,
   };
 }

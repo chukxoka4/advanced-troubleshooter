@@ -32,7 +32,7 @@ function makeRepo() {
 describe("apiKeyService", () => {
   it("generate returns plaintext once and stores only the hash", async () => {
     const { repo, stored } = makeRepo();
-    const service = createApiKeyService({ repository: repo });
+    const service = createApiKeyService({ repository: repo, pepper: "x".repeat(32) });
     const { plaintext, row } = await service.generate({ tenantId: "team-alpha", label: "prod" });
     expect(plaintext).toMatch(/^ats_[A-Za-z0-9_-]{20,}$/);
     expect(row.tenantId).toBe("team-alpha");
@@ -43,7 +43,7 @@ describe("apiKeyService", () => {
 
   it("verify round-trips a freshly generated key", async () => {
     const { repo } = makeRepo();
-    const service = createApiKeyService({ repository: repo });
+    const service = createApiKeyService({ repository: repo, pepper: "x".repeat(32) });
     const { plaintext } = await service.generate({ tenantId: "team-alpha" });
     const verified = await service.verify(plaintext);
     expect(verified?.tenantId).toBe("team-alpha");
@@ -51,7 +51,7 @@ describe("apiKeyService", () => {
 
   it("verify returns null for unknown or malformed keys", async () => {
     const { repo } = makeRepo();
-    const service = createApiKeyService({ repository: repo });
+    const service = createApiKeyService({ repository: repo, pepper: "x".repeat(32) });
     expect(await service.verify("")).toBeNull();
     expect(await service.verify("not-an-api-key")).toBeNull();
     expect(await service.verify("ats_unknown")).toBeNull();
@@ -59,7 +59,7 @@ describe("apiKeyService", () => {
 
   it("never returns plaintext from the repository path", async () => {
     const { repo, stored } = makeRepo();
-    const service = createApiKeyService({ repository: repo });
+    const service = createApiKeyService({ repository: repo, pepper: "x".repeat(32) });
     const { plaintext } = await service.generate({ tenantId: "t" });
     const storedValue = stored[0]?.keyHash ?? "";
     expect(storedValue).not.toContain(plaintext);
@@ -69,7 +69,21 @@ describe("apiKeyService", () => {
 
   it("generate requires a tenantId", async () => {
     const { repo } = makeRepo();
-    const service = createApiKeyService({ repository: repo });
+    const service = createApiKeyService({ repository: repo, pepper: "x".repeat(32) });
     await expect(service.generate({ tenantId: "" })).rejects.toThrow(/tenantId is required/);
+  });
+
+  it("throws at construction when pepper is missing or too short", () => {
+    const { repo } = makeRepo();
+    expect(() => createApiKeyService({ repository: repo, pepper: "" })).toThrow(/pepper/);
+    expect(() => createApiKeyService({ repository: repo, pepper: "short" })).toThrow(/pepper/);
+  });
+
+  it("rotating the pepper invalidates previously-verified keys", async () => {
+    const { repo } = makeRepo();
+    const svc1 = createApiKeyService({ repository: repo, pepper: "a".repeat(32) });
+    const { plaintext } = await svc1.generate({ tenantId: "t" });
+    const svc2 = createApiKeyService({ repository: repo, pepper: "b".repeat(32) });
+    expect(await svc2.verify(plaintext)).toBeNull();
   });
 });
