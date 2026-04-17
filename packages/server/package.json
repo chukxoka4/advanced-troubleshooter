@@ -15,6 +15,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@advanced-troubleshooter/shared": "*",
     "fastify": "^5.8.5",
     "pino": "^10.3.1"
   },
