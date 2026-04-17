@@ -123,9 +123,10 @@ The reviewer agent is invoked via the Agent tool with subagent_type=general-purp
     - .github/workflows/secret-scan.yml (gitleaks against tenants/*.json)
     - both run on PR and push to main
 
-11. chore: first Railway deployment
-    - railway.toml or equivalent config
-    - deploy /api/v1/health, verify it returns appMode: "prototype"
+11. chore: first Render deployment (free tier)
+    - render.yaml blueprint (web service + env var declarations)
+    - docs/deploy-render.md playbook covering Supabase Postgres + Render setup
+    - deploy /api/v1/health, verify it returns appMode: "prototype" and database: "ok"
 ```
 
 **End of Day 1 — Security review batch #1**

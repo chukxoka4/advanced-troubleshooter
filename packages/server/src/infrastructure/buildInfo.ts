@@ -20,6 +20,7 @@ const PACKAGE_JSON_PATH = resolve(HERE, "../../package.json");
 
 function readGitSha(): string | null {
   return (
+    process.env.RENDER_GIT_COMMIT ??
     process.env.RAILWAY_GIT_COMMIT_SHA ??
     process.env.GIT_SHA ??
     null

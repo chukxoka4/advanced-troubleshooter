@@ -1,0 +1,41 @@
+# Render blueprint. Render reads this file to provision/update services.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Layout choice: the Postgres database is NOT declared here on purpose.
+# Prototype uses Supabase (free 500 MB, no expiry) which matches the
+# eventual production path; DATABASE_URL is pasted into the Render
+# dashboard as a sync:false env var.
+
+services:
+  - type: web
+    name: advanced-troubleshooter-api
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: .
+    buildCommand: npm ci --include=dev
+    startCommand: npm --workspace @advanced-troubleshooter/server run start
+    autoDeploy: true
+    healthCheckPath: /api/v1/health
+
+    envVars:
+      # Non-secret config — committed so every deploy is reproducible.
+      - key: APP_MODE
+        value: prototype
+      - key: NODE_VERSION
+        value: "20"
+      - key: HOST
+        value: 0.0.0.0
+
+      # Secret / user-provided values — set manually in the Render dashboard.
+      # Render will not deploy the service until every sync:false var has a value.
+      - key: DATABASE_URL
+        sync: false
+      - key: SHARED_API_KEY
+        generateValue: true
+      - key: TEAM_ALPHA_GH_TOKEN
+        sync: false
+      - key: TEAM_ALPHA_ISSUE_TOKEN
+        sync: false
+      - key: TEAM_ALPHA_LLM_API_KEY
+        sync: false
