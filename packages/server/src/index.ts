@@ -10,17 +10,26 @@ import {
   registerGlobalErrorHandler,
   registerProtectedMiddleware,
 } from "./middleware/register.js";
+import { createGithubMcpClient } from "./infrastructure/githubMcp.js";
+import { createLlmFactory } from "./infrastructure/llm/llmFactory.js";
+import { createAnalyticsRepository } from "./repositories/analytics.repository.js";
+import { createApiKeyRepository } from "./repositories/apiKey.repository.js";
+import { createConversationRepository } from "./repositories/conversation.repository.js";
+import { createAiService } from "./services/aiService.js";
+import { createApiKeyService } from "./services/apiKeyService.js";
+import { registerChatRoute } from "./routes/chat.js";
 import { registerHealthRoutes } from "./routes/health.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
-function resolveVerifyApiKey(): VerifyApiKey {
+function resolveVerifyApiKey(
+  apiKeyService: ReturnType<typeof createApiKeyService>,
+): VerifyApiKey {
   if (isPrototype()) return sharedKeyVerifier(process.env.SHARED_API_KEY);
-  return async () => {
-    throw new Error(
-      "production API key verification is not yet wired — see commit 24 (apiKeyService)",
-    );
+  return async (presented: string): Promise<boolean> => {
+    const row = await apiKeyService.verify(presented);
+    return row !== null;
   };
 }
 
@@ -35,7 +44,19 @@ async function main(): Promise<void> {
 
   const [tenants, buildInfo] = await Promise.all([loadTenants(), loadBuildInfo()]);
   const db = createDatabasePool(requireDatabaseUrl());
-  const verifyApiKey = resolveVerifyApiKey();
+  const conversationRepo = createConversationRepository(db);
+  const analyticsRepo = createAnalyticsRepository(db);
+  const apiKeyRepo = createApiKeyRepository(db);
+  const apiKeyService = createApiKeyService({ repository: apiKeyRepo });
+  const githubMcp = createGithubMcpClient();
+  const llmFactory = createLlmFactory();
+  const aiService = createAiService({
+    conversationRepo,
+    analyticsRepo,
+    githubMcp,
+    llmFactory,
+  });
+  const verifyApiKey = resolveVerifyApiKey(apiKeyService);
   const startedAt = Date.now();
 
   const app = Fastify({ logger: true });
@@ -57,6 +78,7 @@ async function main(): Promise<void> {
   await app.register(
     async (protectedScope) => {
       await registerProtectedMiddleware(protectedScope, { tenants, verifyApiKey });
+      await registerChatRoute(protectedScope, { aiService });
     },
     { prefix: "/api/v1" },
   );
