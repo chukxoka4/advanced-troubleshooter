@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "migrate": "tsx scripts/migrate.ts"
+    "migrate": "tsx scripts/migrate.ts",
+    "create-api-key": "tsx scripts/createApiKey.ts"
   },
   "dependencies": {
     "@advanced-troubleshooter/shared": "*",
