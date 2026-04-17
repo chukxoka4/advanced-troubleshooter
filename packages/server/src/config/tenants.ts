@@ -37,8 +37,8 @@ export interface LoadedTenants {
 function resolveEnvRefs(value: unknown, env: NodeJS.ProcessEnv, path: string[] = []): unknown {
   if (typeof value === "string") {
     const match = ENV_REF_PATTERN.exec(value);
-    if (!match) return value;
-    const envName = match[1]!;
+    if (!match || match[1] === undefined) return value;
+    const envName = match[1];
     const resolved = env[envName];
     if (resolved === undefined || resolved.length === 0) {
       const where = path.length === 0 ? "(root)" : path.join(".");
