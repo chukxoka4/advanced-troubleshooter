@@ -1,0 +1,43 @@
+{
+  "$comment_1": "Copy this file to team-<name>.json and fill it in. NEVER paste raw tokens — every secret MUST be an env-var placeholder of the form ${MY_ENV_VAR}. A CI check and the loader itself reject raw ghp_/github_pat_/sk- strings before they can reach runtime.",
+
+  "tenantId": "team-template",
+  "displayName": "Template Team — rename me",
+
+  "$comment_repos": "One entry per repo this tenant can ask questions about. The loader resolves githubToken from env at startup.",
+  "repos": [
+    {
+      "owner": "your-github-org",
+      "name": "your-repo-name",
+      "description": "What this repo is for",
+      "githubToken": "${TEAM_TEMPLATE_GH_TOKEN}",
+      "defaultBranch": "main"
+    }
+  ],
+
+  "$comment_issueConfig": "Optional. Omit the whole block if this tenant does not draft issues. writeToken needs issues:write scope on targetRepo only.",
+  "issueConfig": {
+    "targetRepo": "your-github-org/your-repo-name",
+    "writeToken": "${TEAM_TEMPLATE_ISSUE_TOKEN}",
+    "templates": ["bug_report", "feature_request"]
+  },
+
+  "$comment_ai": "provider = claude | openai | gemini. apiKey is the provider key, not a GitHub token. dailySpendCapUsd is enforced per-tenant inside the provider impl.",
+  "ai": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "apiKey": "${TEAM_TEMPLATE_LLM_API_KEY}",
+    "dailySpendCapUsd": 50
+  },
+
+  "systemPrompt": "You are a support assistant for <product>. Describe the repo's intent here, what the assistant should and should not do, and any conventions worth highlighting. Always reference file paths when citing code.",
+
+  "$comment_security": "allowedOrigins drives the per-tenant CORS check in production mode. allowedUsers is the current prototype gate; switch to OAuth in production.",
+  "allowedOrigins": ["https://your-embedding-host.example"],
+  "allowedUsers": ["agent-1@example.com"],
+
+  "rateLimits": {
+    "questionsPerMinute": 10,
+    "issuesPerHour": 20
+  }
+}
