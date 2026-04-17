@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Tenant } from "../../config/tenants.js";
 import { createClaudeProvider } from "./claudeProvider.js";
 import { createGeminiProvider } from "./geminiProvider.js";
@@ -49,7 +50,14 @@ export function createLlmFactory(options: LlmFactoryOptions = {}): LlmFactory {
 
   return {
     getProvider(tenant: Tenant): LlmProvider {
-      const key = `${tenant.tenantId}:${tenant.ai.provider}:${tenant.ai.model}`;
+      // Fingerprint the API key so that an in-place rotation evicts the
+      // cached provider (and its in-memory spend tracker) rather than
+      // silently continuing to call the vendor with a stale credential.
+      const keyFingerprint = createHash("sha256")
+        .update(tenant.ai.apiKey)
+        .digest("hex")
+        .slice(0, 16);
+      const key = `${tenant.tenantId}:${tenant.ai.provider}:${tenant.ai.model}:${keyFingerprint}`;
       const cached = cache.get(key);
       if (cached) return cached;
       const provider = build(tenant);

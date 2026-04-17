@@ -45,6 +45,15 @@ describe("llmFactory", () => {
     expect(() => factory.getProvider(tenant)).toThrow(/unknown provider/);
   });
 
+  it("evicts the cached provider when the tenant's API key rotates", () => {
+    const factory = createLlmFactory({ fetchImpl });
+    const base = tenantWith("claude", "team-a");
+    const first = factory.getProvider(base);
+    const rotated = { ...base, ai: { ...base.ai, apiKey: "rotated-key" } };
+    const second = factory.getProvider(rotated);
+    expect(first).not.toBe(second);
+  });
+
   it("memoises per tenantId so spend tracking accumulates", () => {
     const factory = createLlmFactory({ fetchImpl });
     const a = factory.getProvider(tenantWith("claude", "team-a"));

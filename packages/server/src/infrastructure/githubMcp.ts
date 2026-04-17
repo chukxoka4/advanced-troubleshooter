@@ -73,7 +73,12 @@ async function githubGet(
 ): Promise<unknown> {
   const response = await fetchImpl(url, { headers: authHeaders(token, userAgent) });
   if (!response.ok) {
-    throw new Error(`github api ${response.status} ${response.statusText} for ${url}`);
+    // Intentionally omit the query string from the thrown message — for the
+    // code-search endpoint it contains user-supplied search text, which
+    // belongs in structured logs (and only after the caller has scrubbed PII)
+    // rather than in the Error surface.
+    const path = new URL(url).pathname;
+    throw new Error(`github api ${response.status} ${response.statusText} for ${path}`);
   }
   return (await response.json()) as unknown;
 }
