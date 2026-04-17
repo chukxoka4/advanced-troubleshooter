@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createGithubMcpClient } from "./githubMcp.js";
+import { createGithubMcpClient, toSearchQuery } from "./githubMcp.js";
 
 function jsonResponse(body: unknown, init: Partial<ResponseInit> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -40,7 +40,7 @@ describe("githubMcp client", () => {
   it("searchFiles caps the limit at 30", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ items: [] }));
     const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await client.searchFiles("q", repo, "t", { limit: 999 });
+    await client.searchFiles("submit", repo, "t", { limit: 999 });
     const [url] = fetchImpl.mock.calls[0] as [string];
     expect(url).toContain("per_page=30");
   });
@@ -50,7 +50,7 @@ describe("githubMcp client", () => {
       async () => new Response("nope", { status: 403, statusText: "Forbidden" }),
     );
     const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(client.searchFiles("q", repo, "t")).rejects.toThrow(/403/);
+    await expect(client.searchFiles("submit", repo, "t")).rejects.toThrow(/403/);
   });
 
   it("readFile decodes base64 contents and uses the repo defaultBranch", async () => {
@@ -96,5 +96,93 @@ describe("githubMcp client", () => {
     const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(client.searchFiles("q", repo, "")).rejects.toThrow(/github token/);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("searchFiles short-circuits (no fetch) when the question sanitises to empty", async () => {
+    const fetchImpl = vi.fn();
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const hits = await client.searchFiles("?? () // a of", repo, "tok");
+    expect(hits).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("searchFiles sanitises the raw question before hitting GitHub — regression for the 422 produced by the Phase 1 milestone question", async () => {
+    // This is the exact user question that caused an HTTP 500 in
+    // production on 2026-04-17: GitHub rejected the raw string with
+    // HTTP 422 ERROR_TYPE_QUERY_PARSING_FATAL because of the `(owner/name)`
+    // parenthesised expression. The sanitiser must collapse the
+    // question to a valid identifier-only query and preserve the repo
+    // qualifier so code search is still scoped correctly.
+    const rawQuestion =
+      "For each repository you have access to, read the README and summarise " +
+      "what it does in one sentence. Output the full repo name (owner/name) " +
+      "followed by the summary, one repo per line.";
+    const fetchImpl = vi.fn(async () => jsonResponse({ items: [] }));
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await client.searchFiles(rawQuestion, repo, "tok");
+    const [url] = fetchImpl.mock.calls[0] as [string];
+    const rawQ = url.split("?q=")[1]?.split("&")[0] ?? "";
+    const decodedQ = decodeURIComponent(rawQ);
+    // The query GitHub receives is "<sanitised tokens> repo:owner/name".
+    // Split on the repo qualifier so we can assert invariants on each
+    // half independently: the sanitised portion must be free of parser
+    // metacharacters, while the qualifier legitimately contains a slash.
+    const qualifierMarker = " repo:";
+    const qualifierIndex = decodedQ.indexOf(qualifierMarker);
+    expect(qualifierIndex).toBeGreaterThan(0);
+    const sanitisedPortion = decodedQ.slice(0, qualifierIndex);
+    const qualifierPortion = decodedQ.slice(qualifierIndex);
+    // None of the parser metacharacters that caused the production 422
+    // may appear in the user-controlled portion.
+    expect(sanitisedPortion).not.toMatch(/[()\\,\/:]/);
+    // Real tokens from the question are preserved, so code search still
+    // has something meaningful to match on.
+    expect(sanitisedPortion.toLowerCase()).toContain("repository");
+    expect(sanitisedPortion).toContain("README");
+    // The structured repo qualifier is appended *after* sanitisation —
+    // sanitisation only runs on the raw user query, never on our suffix.
+    expect(qualifierPortion).toBe(" repo:awesomemotive/wpforms");
+  });
+});
+
+describe("toSearchQuery", () => {
+  const cases: ReadonlyArray<[string, string]> = [
+    ["", ""],
+    ["hello world", "hello world"],
+    // Short filler words (<3 chars) are stripped.
+    ["a of is it an or to", ""],
+    // Pure punctuation / metacharacters produce nothing.
+    ["()()/\\:?!,;", ""],
+    // Leading dashes would otherwise be read as GitHub negation — stripped.
+    ["-foo --bar", "foo bar"],
+    // Case-insensitive dedup preserves first occurrence's casing.
+    ["Repeat repeat REPEAT different", "Repeat different"],
+    // Hyphens and dots split identifiers (tokens containing them break apart).
+    ["api-contracts package.json auth.ts", "api contracts package json auth"],
+    // Underscores are part of identifiers and preserved.
+    ["snake_case_thing AnotherOne", "snake_case_thing AnotherOne"],
+    // Question-shaped text that used to 422 GitHub.
+    [
+      "What does sharedKeyVerifier do, and why does it hash both keys before comparing them?",
+      "What does sharedKeyVerifier and why hash both keys before comparing",
+    ],
+  ];
+
+  for (const [input, expected] of cases) {
+    it(`sanitises ${JSON.stringify(input)} → ${JSON.stringify(expected)}`, () => {
+      expect(toSearchQuery(input)).toBe(expected);
+    });
+  }
+
+  it("caps the output at 10 unique tokens", () => {
+    const input = Array.from({ length: 50 }, (_, i) => `wordAAA${i}`).join(" ");
+    const result = toSearchQuery(input).split(" ").filter(Boolean);
+    expect(result).toHaveLength(10);
+  });
+
+  it("never includes GitHub parser metacharacters in its output", () => {
+    const hostile = "(A or B) AND path:/etc/passwd -deny repo:x/y";
+    const out = toSearchQuery(hostile);
+    expect(out).not.toMatch(/[()\/:\-]/);
   });
 });

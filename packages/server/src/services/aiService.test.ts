@@ -169,4 +169,37 @@ describe("aiService.askQuestion", () => {
     expect(logArgs.reposCount).toBe(1);
     expect(logArgs.metadata.provider).toBe("claude");
   });
+
+  it("completes with empty reposSearched/filesReferenced when every search returns no hits", async () => {
+    // Reproduces the common real-world case where GitHub's code-search
+    // index has not covered a tenant's repos (selective indexing for
+    // low-activity accounts). The service must still hand a valid
+    // response back to the route layer rather than throwing — the LLM
+    // will answer with whatever context the system prompt alone provides.
+    const deps = makeDeps();
+    (deps.githubMcp.searchFiles as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const service = createAiService(deps);
+
+    const result = await service.askQuestion({
+      tenant: makeTenant(),
+      sessionId: "s1",
+      question: "anything",
+    });
+
+    expect(result.reposSearched).toEqual([]);
+    expect(result.filesReferenced).toEqual([]);
+    expect(result.answer).toBe("answer");
+    // The empty-grounding path must: still hit search (exactly once per
+    // tenant repo), never read any file, still produce an LLM call, still
+    // persist agent+assistant messages, and still log exactly one
+    // analytics event. Empty hits is a valid state, not an error state.
+    expect(deps.githubMcp.searchFiles).toHaveBeenCalledTimes(1);
+    expect(deps.githubMcp.readFile).not.toHaveBeenCalled();
+    expect(deps.provider.sendMessage).toHaveBeenCalledTimes(1);
+    expect(deps.conversationRepo.saveMessage).toHaveBeenCalledTimes(2);
+    const savedRoles = (deps.conversationRepo.saveMessage as ReturnType<typeof vi.fn>)
+      .mock.calls.map((c) => (c[0] as { role: string }).role);
+    expect(savedRoles).toEqual(["agent", "assistant"]);
+    expect(deps.analyticsRepo.logEvent).toHaveBeenCalledTimes(1);
+  });
 });

@@ -49,6 +49,41 @@ const DEFAULT_BASE_URL = "https://api.github.com";
 const DEFAULT_USER_AGENT = "advanced-troubleshooter/0.0";
 const MAX_SEARCH_LIMIT = 30;
 
+/**
+ * GitHub code-search query tokeniser.
+ *
+ * `/search/code` parses its `q` parameter as a structured search expression.
+ * Parentheses, colons, slashes (outside a `repo:` qualifier), and leading
+ * dashes are all syntactically meaningful; a natural-language question
+ * that contains any of them is rejected with HTTP 422
+ * `ERROR_TYPE_QUERY_PARSING_FATAL`. aiService previously forwarded the raw
+ * user question straight to this endpoint, so any question containing
+ * `(owner/name)` or similar punctuation 500'd the /api/v1/chat request.
+ *
+ * This sanitiser extracts up to MAX_SEARCH_TOKENS alphanumeric
+ * identifier-shaped tokens from the raw text, de-duplicated
+ * case-insensitively, and joins them with spaces. The result is always a
+ * valid GitHub code-search query — free of parser metacharacters — and is
+ * also better input for code search itself (keywords over natural
+ * language). Exposed for testing; searchFiles below is the only caller.
+ */
+const SEARCH_TOKEN_PATTERN = /[A-Za-z][A-Za-z0-9_]{2,}/g;
+const MAX_SEARCH_TOKENS = 10;
+
+export function toSearchQuery(raw: string): string {
+  const tokens = raw.match(SEARCH_TOKEN_PATTERN) ?? [];
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    unique.push(token);
+    if (unique.length === MAX_SEARCH_TOKENS) break;
+  }
+  return unique.join(" ");
+}
+
 function requireToken(token: string): string {
   if (!token || token.length === 0) {
     throw new Error("github token is required");
@@ -94,8 +129,16 @@ export function createGithubMcpClient(options: GithubMcpOptions = {}): GithubMcp
 
   return {
     async searchFiles(query, repo, token, searchOptions = {}) {
+      requireToken(token);
       const limit = Math.min(searchOptions.limit ?? 10, MAX_SEARCH_LIMIT);
-      const q = `${query} repo:${repo.owner}/${repo.name}`;
+      const safeQuery = toSearchQuery(query);
+      // Short-circuit: if the sanitised query has no usable tokens (e.g.
+      // the user's question was all punctuation or all short words), skip
+      // the GitHub call entirely. Sending an empty `q` param to
+      // /search/code returns 422 — return an empty hit list instead so
+      // aiService can fall through to its "no repository context" path.
+      if (safeQuery.length === 0) return [];
+      const q = `${safeQuery} repo:${repo.owner}/${repo.name}`;
       const url = `${baseUrl}/search/code?q=${encodeURIComponent(q)}&per_page=${limit}`;
       const body = (await githubGet(url, token, fetchImpl, userAgent)) as {
         items?: Array<{ path?: string; html_url?: string }>;
