@@ -112,6 +112,43 @@ describe("loadTenants", () => {
     await expect(loadTenants({ dir, env: {} })).rejects.toThrow(/github_pat_/);
   });
 
+  it("throws ValidationError when a raw Slack bot token appears anywhere in the JSON", async () => {
+    // NB: fixture is deliberately mangled so it matches our own regex
+    // (xox[abprs]- followed by 10+ [A-Za-z0-9-] chars) without matching
+    // the stricter digit-segment shape that GitHub push protection and
+    // gitleaks use for real Slack tokens. This keeps the test honest
+    // against our scanner while not tripping upstream secret-scanners
+    // that watch the commit itself.
+    await writeTenant("team-alpha.json", {
+      ...BASE_TENANT,
+      systemPrompt: "Your slack hook: xoxb-example-not-a-real-token",
+    });
+
+    await expect(loadTenants({ dir, env: {} })).rejects.toThrow(ValidationError);
+    await expect(loadTenants({ dir, env: {} })).rejects.toThrow(/Slack/);
+  });
+
+  it("throws ValidationError when a PEM private key block appears", async () => {
+    await writeTenant("team-alpha.json", {
+      ...BASE_TENANT,
+      systemPrompt: "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQ...",
+    });
+
+    await expect(loadTenants({ dir, env: {} })).rejects.toThrow(ValidationError);
+    await expect(loadTenants({ dir, env: {} })).rejects.toThrow(/PEM/);
+  });
+
+  it("throws ValidationError when a JWT-shaped string appears", async () => {
+    await writeTenant("team-alpha.json", {
+      ...BASE_TENANT,
+      systemPrompt:
+        "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    });
+
+    await expect(loadTenants({ dir, env: {} })).rejects.toThrow(ValidationError);
+    await expect(loadTenants({ dir, env: {} })).rejects.toThrow(/JWT/);
+  });
+
   it("throws ValidationError when a required field is missing", async () => {
     const bad = { ...BASE_TENANT } as Record<string, unknown>;
     delete bad.systemPrompt;

@@ -38,8 +38,8 @@ describe("errorHandler middleware", () => {
     });
   }
 
-  it("maps Fastify schema-validation errors to 400 validation_error", async () => {
-    const app = Fastify();
+  it("maps Fastify schema-validation errors to 400 validation_error with a generic message", async () => {
+    const app = Fastify({ logger: false });
     registerErrorHandler(app);
     app.post(
       "/",
@@ -47,8 +47,8 @@ describe("errorHandler middleware", () => {
         schema: {
           body: {
             type: "object",
-            required: ["name"],
-            properties: { name: { type: "string" } },
+            required: ["internalFieldName"],
+            properties: { internalFieldName: { type: "string" } },
           },
         },
       },
@@ -61,8 +61,12 @@ describe("errorHandler middleware", () => {
         payload: {},
       });
       expect(response.statusCode).toBe(400);
-      const body = response.json() as { error: string };
-      expect(body.error).toBe("validation_error");
+      expect(response.json()).toEqual({
+        error: "validation_error",
+        message: "Request payload failed validation.",
+      });
+      // The internal field name must NOT leak to the client via error.message.
+      expect(response.body).not.toContain("internalFieldName");
     } finally {
       await app.close();
     }

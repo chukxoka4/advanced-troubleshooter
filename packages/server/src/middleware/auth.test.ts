@@ -102,4 +102,15 @@ describe("sharedKeyVerifier", () => {
     expect(await verify("correct-horse-battery-stapl")).toBe(false);
     expect(await verify("")).toBe(false);
   });
+
+  it("rejects keys of differing length without short-circuiting the crypto path", async () => {
+    // Both SHA-256 digests are 32 bytes regardless of input length, so the
+    // comparison is constant-time with respect to input-length mismatches.
+    // The assertion here is a behavioural one: an input that is much shorter
+    // or much longer than the configured key must still return false.
+    const verify = sharedKeyVerifier("k".repeat(64));
+    expect(await verify("k")).toBe(false);
+    expect(await verify("k".repeat(1000))).toBe(false);
+    expect(await verify("k".repeat(64))).toBe(true);
+  });
 });

@@ -727,6 +727,8 @@ APP_MODE=production   # CORS per-tenant, per-tenant rate limits, per-tenant API 
 
 Every middleware reads from `appMode.ts`. Switching modes is one env var change. No code edits, no rebuilds beyond a server restart.
 
+**Prototype-mode security trade-off (tenant spoofing).** In `APP_MODE=prototype`, the single `SHARED_API_KEY` authenticates the *caller* but does not *identify a tenant*. Any client holding the shared key can set `X-Tenant-Id` to any configured tenantId, and the rest of the chain will happily scope the request to whichever tenant the header names. This is acceptable for the prototype because a prototype deployment is a single trust zone — one team, one shared key, all tenants owned by the same operator. It becomes unacceptable the moment the system serves mutually-distrusting tenants, which is exactly why commit 24 replaces the shared key with per-tenant hashed API keys stored in the `api_keys` table and looked up by bcrypt/argon2 match. Once commit 24 is in, the key itself determines the tenant, and `X-Tenant-Id` becomes a redundant header (kept only for logging). Prototype deployments must treat this trade-off as a hard constraint: never expose a prototype-mode instance to untrusted clients.
+
 ### Structured errors (`shared/errors/`)
 
 Architecture-Enforcer Rule 7. Domain errors are the only thing services throw:

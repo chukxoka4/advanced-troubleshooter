@@ -20,6 +20,9 @@ const RAW_SECRET_PATTERNS: ReadonlyArray<{ label: string; regex: RegExp }> = [
   { label: "Anthropic (sk-ant-)", regex: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
   { label: "OpenAI (sk-)", regex: /\bsk-[A-Za-z0-9]{20,}/ },
   { label: "Google API (AIza)", regex: /\bAIza[A-Za-z0-9_-]{20,}/ },
+  { label: "Slack token (xox[abprs]-)", regex: /\bxox[abprs]-[A-Za-z0-9-]{10,}/ },
+  { label: "PEM private key block", regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/ },
+  { label: "JWT (three base64url segments)", regex: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/ },
 ];
 
 export function scanForRawSecrets(fileName: string, value: unknown, path: string[] = []): void {

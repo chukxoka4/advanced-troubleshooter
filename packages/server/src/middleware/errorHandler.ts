@@ -34,9 +34,17 @@ export function registerErrorHandler(app: FastifyInstance): void {
     }
 
     if (isFastifyValidationError(error)) {
+      // Fastify's default validation message embeds field paths and schema
+      // hints (e.g. "body must have required property 'x'"). Those are
+      // diagnostic gold server-side but leak internal contract shape to
+      // clients, so we log the detail and return a generic public message.
+      req.log.warn(
+        { validation: error.validation, validationContext: error.validationContext },
+        "request failed schema validation",
+      );
       const body: ErrorResponse = {
         error: "validation_error",
-        message: error.message,
+        message: "Request payload failed validation.",
       };
       return reply.code(400).send(body);
     }

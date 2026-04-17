@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # npm dependencies across every workspace — Dependabot walks workspaces
+  # automatically when directory is repo root. Grouped to reduce PR noise:
+  # one combined PR per week for all dev-only bumps, separate PRs per
+  # runtime dependency so security-relevant changes stay isolated.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+      include: scope
+    groups:
+      dev-dependencies:
+        dependency-type: development
+
+  # GitHub Actions versions — keep runners and actions pinned-but-current
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: ci
+      include: scope

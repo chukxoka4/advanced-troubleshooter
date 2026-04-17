@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ForbiddenError } from "../shared/errors/index.js";
 
@@ -7,6 +7,15 @@ import { ForbiddenError } from "../shared/errors/index.js";
  * verifies it via a caller-supplied verifier function. The verifier itself
  * is swappable so prototype (shared .env key) and production (hashed
  * per-tenant keys — added in commit 24) share the same middleware.
+ *
+ * PROTOTYPE-MODE CAVEAT (tracked in architecture-plan §"Auth & tenant
+ * isolation"): when APP_MODE=prototype, a valid SHARED_API_KEY does not
+ * identify a tenant — any authenticated client can set X-Tenant-Id to
+ * any configured tenantId and tenant scope simply follows header choice.
+ * Prototype deployments must therefore be treated as a single trust zone
+ * (one team, one shared key). Commit 24 replaces this with per-tenant
+ * hashed keys stored in the api_keys table, at which point the key
+ * itself determines the tenant and spoofing by header becomes impossible.
  */
 
 const BEARER_PREFIX = /^Bearer\s+/i;
@@ -37,16 +46,22 @@ export async function registerAuth(
   });
 }
 
+function sha256(input: string): Buffer {
+  return createHash("sha256").update(input, "utf8").digest();
+}
+
 /**
- * Prototype verifier. Constant-time compares the presented key to a single
- * shared secret from the environment. Does not touch the database.
+ * Prototype verifier. SHA-256s both the presented and the configured key
+ * to a fixed 32-byte digest, then compares with timingSafeEqual. Hashing
+ * to a constant width eliminates the length-dependent timing side channel
+ * that a naïve length-check + timingSafeEqual exposes (an attacker can
+ * probe key length by measuring response time on mismatched inputs).
  */
 export function sharedKeyVerifier(sharedKey: string | undefined): VerifyApiKey {
+  const expectedDigest = sharedKey ? sha256(sharedKey) : null;
   return async (presented: string): Promise<boolean> => {
-    if (!sharedKey) return false;
-    const a = Buffer.from(presented, "utf8");
-    const b = Buffer.from(sharedKey, "utf8");
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    if (!expectedDigest) return false;
+    const presentedDigest = sha256(presented);
+    return timingSafeEqual(presentedDigest, expectedDigest);
   };
 }
