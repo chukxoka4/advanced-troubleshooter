@@ -8,27 +8,6 @@
       "description": "The assistant repo itself — useful for self-referential test queries during the prototype",
       "githubToken": "${TEAM_ALPHA_GH_TOKEN}",
       "defaultBranch": "main"
-    },
-    {
-      "owner": "chukxoka4",
-      "name": "exchange-api",
-      "description": "Older public repo included in the prototype tenant so Phase 1 grounding can be verified against a repo GitHub code search has already indexed",
-      "githubToken": "${TEAM_ALPHA_GH_TOKEN}",
-      "defaultBranch": "main"
-    },
-    {
-      "owner": "chukxoka4",
-      "name": "scraping-spider",
-      "description": "Older public repo included in the prototype tenant so Phase 1 grounding can be verified against a repo GitHub code search has already indexed",
-      "githubToken": "${TEAM_ALPHA_GH_TOKEN}",
-      "defaultBranch": "main"
-    },
-    {
-      "owner": "chukxoka4",
-      "name": "check-the-number",
-      "description": "Older public repo included in the prototype tenant so Phase 1 grounding can be verified against a repo GitHub code search has already indexed",
-      "githubToken": "${TEAM_ALPHA_GH_TOKEN}",
-      "defaultBranch": "main"
     }
   ],
   "issueConfig": {

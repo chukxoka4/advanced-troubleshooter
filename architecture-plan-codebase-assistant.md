@@ -1,8 +1,10 @@
 # ADR-001: Codebase-Aware Support Assistant
 
-**Status:** Proposed
+**Status:** Accepted (Phase 1 shipped; Phase 2 pivots retrieval from keyword search to repo map + agent loop)
 **Date:** April 17, 2026
 **Deciders:** Support Engineering, DevOps, Product Teams
+
+> **Revision note (post–Phase 1):** The original plan assumed GitHub's `/search/code` endpoint (via a client we called "GitHub MCP") would be enough for retrieval. Phase 1 shipped that pipeline and proved it does not meet the goal: `/search/code` is keyword-only with AND semantics, index-lagged for new repos, and unable to answer natural-language support questions. This ADR has been updated to document the retrieval mechanism that replaces it — a **lightweight repo map** per repo and an **agent loop** that gives the LLM a small set of tools (`readFile`, `searchCode`, `findSymbol`, `createIssue`, `searchIssues`) — and to document the **per-repo scoping** model that prevents cross-repo leakage when a tenant owns more than one repo. The layered architecture, tenant isolation, and provider-agnostic LLM layer are unchanged.
 
 ---
 
@@ -14,9 +16,11 @@ We need a tool that lets support agents ask natural-language questions about the
 
 ### Constraints
 
-- **Read-only access** — the tool must never modify code, create PRs, or push commits
+- **Read-only against code** — the tool must never modify code, create PRs, or push commits. The only write it performs is creating GitHub issues, via a separate narrowly-scoped token.
 - **Multi-team** — different teams own different products, each with their own inboxes and repos
 - **Multi-repo** — a single product may span two or more repositories
+- **Per-repo query scoping** — when a tenant owns many repos, a single support question only runs against the repos the agent selects for that question. No cross-repo context leakage; no way for one repo's code to contaminate another's answer.
+- **Natural-language questions, code-speak answers** — the tool must turn "can a trial-plan customer receive emails when the resource-library opt-in is submitted?" into a code-grounded answer with exact file paths and line ranges. Keyword search over GitHub is not sufficient.
 - **Clean separation** — frontend is fully decoupled from backend; backend has single-responsibility modules
 - **Easy configuration** — teams onboard themselves by providing a repo URL and token, not by writing code
 
@@ -58,13 +62,25 @@ The prototype has fewer features than the full system, but every line of code is
 - **Error tracking SDK slot** — Sentry init lives in `infrastructure/`; in prototype it's a no-op, in production the DSN is set. No code changes to enable.
 - **CI/CD pipeline exists from Day 1** — `.github/workflows/` runs tests + secret scan on every PR.
 - **Frontend build has TWO targets from Day 4** — `build:app` and `build:widget`. Switching deployment shape is `npm run build:widget`, not a rewrite.
-- **LLM provider abstraction from Day 2** — `infrastructure/llm/` with a single `LlmProvider` interface and one file per provider (Claude, OpenAI, Gemini). Each tenant picks its provider in config. No service file ever imports a vendor SDK directly.
+- **LLM provider abstraction from Day 2** — `infrastructure/llm/` with a single `LlmProvider` interface and one file per provider (Claude, OpenAI, Gemini). Each tenant picks its provider in config. No service file ever imports a vendor SDK directly. The interface gains `sendMessageWithTools` in Phase 2 when the agent loop lands; each provider adapts to its vendor's tool-calling shape so the agent loop remains vendor-neutral.
+- **Single `/chat` route for both Q&A and issue creation** — the agent loop decides which tool (`readFile`, `searchCode`, `findSymbol`, `createIssue`, `searchIssues`) to call. No parallel `/issues/draft` and `/issues/create` routes; the "draft" is just the model's own preview before it calls `createIssue`. Fewer routes to secure, one isolation model to enforce.
+- **Per-repo scoping gate from Day 1 of Phase 2** — `repoScope.service.ts` is the ONLY place that answers "is this repo in-scope for this turn?". Tools delegate to it. The service is pure (no I/O) and 30–50 lines; that smallness is the point.
 
 ---
 
 ## Decision
 
-Build a three-layer system: a standalone chat frontend (prototype) / embeddable widget (production), a configuration-driven API server (backend), and a GitHub MCP + provider-agnostic LLM integration layer (AI core). Each layer is independently deployable. Each tenant chooses its own LLM provider (Claude, OpenAI, or Gemini) — the system is not locked to any single vendor.
+Build a three-layer system: a standalone chat frontend (prototype) / embeddable widget (production), a configuration-driven API server (backend), and a provider-agnostic LLM integration layer with an **agent loop** and a **repo map** for retrieval (AI core). Each layer is independently deployable. Each tenant chooses its own LLM provider (Claude, OpenAI, or Gemini) — the system is not locked to any single vendor.
+
+### Why repo map + agent loop, not RAG/vector DB and not keyword search
+
+- **Keyword search alone (what Phase 1 tried)** — GitHub's `/search/code` is AND-semantics keyword search with indexing lag on new repos. It cannot handle natural-language questions like "can a trial-plan customer…". Rejected by field test.
+- **RAG / vector DB** — works, but requires an embedding pipeline, a vector store, a chunking strategy, and re-indexing on every push. Infra cost, ongoing maintenance, and chunk staleness for a support-team-sized workload. Rejected for prototype; may be layered on later if latency or scale demands it.
+- **Repo map + agent loop (chosen)** — at index time, a `tree-sitter` pass over each repo produces a compact text outline (class/function signatures, imports, line ranges — a few KB per thousand LOC). The map is regenerated on commit via a webhook or a scheduled pull; it is cheap, always fresh, and lives in the same Postgres that stores conversations. At query time the map is injected into the model's system prompt so the model *navigates* the codebase, then calls the `readFile` tool on the exact paths and lines it wants. A support question that requires searching wide — "where is trial-plan eligibility checked?" — uses `searchCode` or `findSymbol`. The model, not a pre-built vector index, decides what to retrieve. This is the same pattern every serious code-aware assistant (including Cursor) uses.
+
+### Why a small, fixed tool set rather than free-form function calling
+
+The tool set is deliberately narrow — five tools — because every additional tool widens the attack surface, increases prompt complexity, and raises tool-calling error rates. Five covers the use cases: read a file, search for a string, jump to a symbol, create an issue, check for duplicate issues.
 
 ---
 
@@ -98,7 +114,15 @@ Build a three-layer system: a standalone chat frontend (prototype) / embeddable 
 │            ┌──────────────────────────────┐                  │
 │            │         Services             │                  │
 │            │  (all business logic here)   │                  │
-│            │  aiService / issueFormatter  │                  │
+│            │  aiService                   │                  │
+│            │    → repoScope.service       │                  │
+│            │    → agentLoop.service       │                  │
+│            │         → tools/{readFile,   │                  │
+│            │            searchCode,       │                  │
+│            │            findSymbol,       │                  │
+│            │            createIssue,      │                  │
+│            │            searchIssues}     │                  │
+│            │  repoMap.service             │                  │
 │            └──────────┬───────────────────┘                  │
 │                       ▼                                      │
 │            ┌──────────────────────────────┐                  │
@@ -106,13 +130,18 @@ Build a three-layer system: a standalone chat frontend (prototype) / embeddable 
 │            │  (all data access here)      │                  │
 │            │  conversationRepository      │                  │
 │            │  analyticsRepository         │                  │
+│            │  apiKeyRepository            │                  │
+│            │  repoMapRepository           │                  │
 │            └──────────┬───────────────────┘                  │
 │                       ▼                                      │
 │            ┌──────────────────────────────┐                  │
 │            │      Infrastructure          │                  │
 │            │  (external client init)      │                  │
-│            │  githubMcp / claudeClient    │                  │
-│            │  supabaseClient / issueCreator│                 │
+│            │  githubClient (read-only)    │                  │
+│            │  issueCreator (issues:write) │                  │
+│            │  treeSitter (parser wrapper) │                  │
+│            │  supabaseClient              │                  │
+│            │  llm/{openai,claude,gemini}  │                  │
 │            └──────────────────────────────┘                  │
 │                                                             │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -136,38 +165,66 @@ Build a three-layer system: a standalone chat frontend (prototype) / embeddable 
 ### Flow 1: Agent asks a codebase question
 
 ```
-1. Agent types question in chat UI
-2. UI sends POST to /api/v1/chat with { tenantId, message, sessionId }
-3. CORS middleware validates origin
-4. Auth Guard validates the API key
-5. Tenant Resolver attaches tenant config to the request (from config/, not inline)
-6. Rate Limiter checks per-tenant limits
-7. chat.ts route delegates to aiService — zero logic in the route
-8. aiService calls conversationRepository.getHistory(sessionId)
-9. aiService calls githubMcp (infrastructure) to search/read relevant files
-10. aiService calls llmFactory.getProvider(tenant.ai) → returns the configured LlmProvider
-11. aiService calls provider.sendMessage({ systemPrompt, messages }) — provider-agnostic call
-12. The provider (Claude / OpenAI / Gemini) returns a natural-language answer grounded in the code
-13. aiService calls conversationRepository.saveMessage() for both question and answer
-14. analyticsRepository.logEvent() records the query event (including which provider was used)
-15. Response flows back through the route to the UI
+ 1. Agent types question in chat UI; UI sends POST /api/v1/chat with:
+      { sessionId, message, repoScope?: ["owner/name", ...] }
+    (tenantId comes from the X-Tenant-Id header, never the body.)
+ 2. CORS middleware validates origin.
+ 3. Auth Guard validates the API key.
+ 4. Tenant Resolver attaches the frozen tenant config to the request.
+ 5. Rate Limiter checks per-tenant limits.
+ 6. chat.ts delegates to aiService — zero logic in the route.
+ 7. aiService calls repoScope.service.validate(request.repoScope, tenant) →
+    returns the canonical allowed-repos set. Anything not in tenant.repos
+    is rejected as ValidationError. If repoScope is omitted, the set is
+    tenant.defaultRepoScope (if configured) or all tenant repos.
+ 8. aiService calls conversationRepository.getHistory(tenantId, sessionId).
+ 9. aiService calls repoMap.service.renderForScope(tenant, allowedRepos) →
+    returns a repo-map fragment listing only the scoped repos' outlines.
+    Out-of-scope repos are never mentioned in the system prompt.
+10. aiService calls agentLoop.service.run({
+      tenant, allowedRepos, history, systemPrompt, userMessage
+    }). The loop:
+      a. Gets the provider via llmFactory.getProvider(tenant.ai).
+      b. Sends the model the system prompt (tenant prompt + repo map
+         fragment) and the five tools (readFile, searchCode, findSymbol,
+         createIssue, searchIssues).
+      c. On each model tool call, the loop's dispatcher verifies that the
+         tool's `repo` argument is in allowedRepos. If not, the tool
+         returns an error string to the model — no GitHub call is made.
+      d. Iterates up to MAX_TURNS (default 8) and MAX_TOOL_CALLS per turn.
+      e. Returns the final assistant message plus the list of actual
+         files/lines cited and tool-call trace.
+11. aiService saves both question and answer via conversationRepository.
+12. analyticsRepository.logEvent records provider, latency, reposCount,
+    tool-call count, and prompt/completion token usage.
+13. Response flows back to the UI with the answer, citations, and
+    (optionally) the tool-call trace for transparency.
 ```
 
-### Flow 2: Agent drafts a GitHub issue
+### Flow 2: Agent creates a GitHub issue (as a tool call, not a separate mode)
 
 ```
-1. Agent switches to "Draft Issue" mode
-2. Agent provides: what happened, error logs, customer context
-3. UI sends POST to /api/v1/issues/draft with { tenantId, details }
-4. issueService calls issueFormatter (service) to fill template fields via Claude
-5. issueService calls githubMcp to find relevant code files
-6. Response returns structured JSON + a short-lived draft token
-7. UI renders a preview the agent can review and edit
-8. Agent clicks "Create Issue" → UI sends POST to /api/v1/issues/create { draftToken, edits }
-9. Route validates draft token (prevents arbitrary issue creation)
-10. issueCreator (infrastructure) creates the issue via GitHub API (issues:write token)
-11. Agent sees the issue URL in the UI
+1. Agent asks in chat: "File a bug for this against the Beacon repo."
+   (Or the UI can still offer a "Draft Issue" button that sends a
+   parameterised prompt — the backend path is the same.)
+2. aiService runs the agent loop against the scoped repos.
+3. The model calls the `searchIssues` tool first to check for duplicates.
+4. If none found, the model calls the `createIssue` tool with title,
+   body (formatted to the tenant's template), labels, and target repo.
+5. The tool validates the target repo is in tenant.issueConfig.targetRepo
+   (NOT just in tenant.repos — issue creation is scoped tighter than
+   reads). It then calls infrastructure/issueCreator.ts with the
+   tenant's separate issues:write token.
+6. The resulting issue URL is returned to the model, which cites it in
+   its reply to the agent.
 ```
+
+Draft-before-create is implemented as a two-step prompt: the model first
+calls a `previewIssue` helper tool (no external call, pure formatting)
+and shows the agent the preview in chat. Only when the agent confirms
+does the model call `createIssue`. This means there is no separate
+`/issues/draft` and `/issues/create` route surface — one `/chat` route,
+with the tool protocol handling the state.
 
 ---
 
@@ -239,30 +296,39 @@ codebase-assistant/
 │   │   │   │
 │   │   │   ├── routes/                      ← Controller layer (thin: parse, delegate, respond)
 │   │   │   │   ├── chat.ts                  # POST /api/v1/chat → calls aiService
-│   │   │   │   ├── issues.ts                # POST /api/v1/issues/draft + /create → calls issueService
-│   │   │   │   └── health.ts                # GET /api/v1/health → checks Supabase + returns version + APP_MODE
+│   │   │   │   ├── tenantRepos.ts           # GET  /api/v1/tenant/repos → list scoped repos for UI picker
+│   │   │   │   └── health.ts                # GET  /api/v1/health → checks Supabase + returns version + APP_MODE
 │   │   │   │
 │   │   │   ├── services/                    ← Business logic (ALL logic lives here)
-│   │   │   │   ├── aiService.ts             # Orchestrates: history → MCP search → Claude → save
-│   │   │   │   ├── issueService.ts          # Orchestrates: format → find files → draft token → create
-│   │   │   │   ├── issueFormatter.ts        # Maps Claude output → structured GH issue fields
-│   │   │   │   └── apiKeyService.ts         # Generates + verifies per-tenant API keys (used by admin script)
+│   │   │   │   ├── aiService.ts             # Orchestrates: history → scope → agentLoop → save → log
+│   │   │   │   ├── agentLoop.service.ts     # Tool-calling loop with iteration and spend caps
+│   │   │   │   ├── repoScope.service.ts     # The ONLY gate: validates request.repoScope ⊆ tenant.repos
+│   │   │   │   ├── repoMap.service.ts       # build/refresh/render the tree-sitter repo map per scope
+│   │   │   │   ├── apiKeyService.ts         # Generates + verifies per-tenant API keys
+│   │   │   │   └── tools/                   ← One file per tool; each re-validates its repo arg at exec time
+│   │   │   │       ├── readFile.tool.ts     # Read a file range from a scoped repo
+│   │   │   │       ├── searchCode.tool.ts   # Keyword search within the scoped set (fallback path)
+│   │   │   │       ├── findSymbol.tool.ts   # Look up a class/function in the repo map
+│   │   │   │       ├── createIssue.tool.ts  # Create a GH issue in tenant.issueConfig.targetRepo
+│   │   │   │       └── searchIssues.tool.ts # Look for duplicates before filing
 │   │   │   │
 │   │   │   ├── repositories/                ← Data access (ALL Supabase calls live here)
 │   │   │   │   ├── conversation.repository.ts   # getHistory(), saveMessage()
 │   │   │   │   ├── analytics.repository.ts      # logEvent()
-│   │   │   │   └── apiKey.repository.ts         # storeKeyHash(), findByKeyHash() — keys stored hashed, never plaintext
+│   │   │   │   ├── apiKey.repository.ts         # storeKeyHash(), findByKeyHash() — keys stored hashed, never plaintext
+│   │   │   │   └── repoMap.repository.ts        # upsertMap(), getMap(), listMapsForTenant() — per-tenant + per-repo scoped
 │   │   │   │
 │   │   │   ├── infrastructure/              ← External client wrappers (no logic, just calls)
-│   │   │   │   ├── githubMcp.ts             # GitHub MCP client — search files, read contents
-│   │   │   │   ├── llm/                     ← Provider-agnostic LLM layer
-│   │   │   │   │   ├── types.ts             # LlmProvider interface — sendMessage(), getUsage()
-│   │   │   │   │   ├── claudeProvider.ts    # Anthropic SDK implementation
-│   │   │   │   │   ├── openaiProvider.ts    # OpenAI SDK implementation
-│   │   │   │   │   ├── geminiProvider.ts    # Google AI SDK implementation
+│   │   │   │   ├── githubClient.ts          # Read-only GitHub REST: getRepo, readFile, listDir, searchCode
+│   │   │   │   ├── issueCreator.ts          # GitHub issues:write — separate narrowly-scoped token
+│   │   │   │   ├── treeSitter.ts            # tree-sitter wrapper: parse buffer → [{symbol, kind, lineStart, lineEnd}]
+│   │   │   │   ├── llm/                     ← Provider-agnostic LLM layer (all support tool calling)
+│   │   │   │   │   ├── types.ts             # LlmProvider: sendMessage, sendMessageWithTools, getUsage
+│   │   │   │   │   ├── claudeProvider.ts    # Anthropic SDK — `tools` param, `tool_use` / `tool_result` blocks
+│   │   │   │   │   ├── openaiProvider.ts    # OpenAI SDK — `tools` param, `tool_calls` on messages
+│   │   │   │   │   ├── geminiProvider.ts    # Google AI SDK — functionDeclarations + functionCall/Response
 │   │   │   │   │   └── llmFactory.ts        # Reads tenant.ai.provider, returns the right provider
 │   │   │   │   ├── supabaseClient.ts        # Supabase client init (singleton)
-│   │   │   │   ├── issueCreator.ts          # GitHub Issues API — creates issues (write token)
 │   │   │   │   ├── logger.ts                # Pino structured logger — used by every layer
 │   │   │   │   └── errorTracker.ts          # Sentry init — no-op in prototype, active in production via DSN env var
 │   │   │   │
@@ -294,11 +360,12 @@ codebase-assistant/
 │   │   │   └── createApiKey.ts              # `npm run create-api-key -- --tenant team-alpha` — generates + stores hashed key, prints plaintext once
 │   │   │
 │   │   ├── .env.example                     # ← Required env vars documented with descriptions:
-│   │   │                                    #     APP_MODE, DATABASE_URL, DRAFT_TOKEN_SECRET,
+│   │   │                                    #     APP_MODE, DATABASE_URL, API_KEY_PEPPER,
+│   │   │                                    #     SHARED_API_KEY (prototype only),
 │   │   │                                    #     SENTRY_DSN (optional), LOG_LEVEL,
 │   │   │                                    #     plus per-tenant entries:
-│   │   │                                    #       ${TEAM_X_GH_TOKEN}      (read)
-│   │   │                                    #       ${TEAM_X_ISSUE_TOKEN}   (write, optional)
+│   │   │                                    #       ${TEAM_X_GH_TOKEN}      (contents:read)
+│   │   │                                    #       ${TEAM_X_ISSUE_TOKEN}   (issues:write on target repo, optional)
 │   │   │                                    #       ${TEAM_X_LLM_API_KEY}   (Claude OR OpenAI OR Gemini key)
 │   │   ├── package.json
 │   │   └── README.md
@@ -356,6 +423,9 @@ Each team gets a single JSON file. Adding a new team means adding one file — n
       "defaultBranch": "main"
     }
   ],
+  "defaultRepoScope": [
+    "awesomemotive/wpforms-plugin"
+  ],
   "issueConfig": {
     "targetRepo": "awesomemotive/wpforms-plugin",
     "writeToken": "${TEAM_ALPHA_ISSUE_TOKEN}",
@@ -381,7 +451,9 @@ Each team gets a single JSON file. Adding a new team means adding one file — n
 
 **Tokens are environment variable references, not raw values.** The JSON says `${TEAM_ALPHA_GH_TOKEN}` and `config/tenants.ts` resolves it from `process.env` at startup. Raw token strings are never in committed files. The `_template.json` file documents this explicitly. A CI check will block any `ghp_` or `github_pat_` string appearing in `tenants/*.json`.
 
-**Each repo has its own entry** so the MCP knows where to look. When an agent asks a question, the AI service searches across all repos listed for that tenant.
+**Each repo has its own entry** so the repo map indexer knows what to build against. When an agent asks a question, only the repos in the request's `repoScope` (or `defaultRepoScope` if the request omits it) are included — never the full tenant list unless the agent explicitly opts in.
+
+**`defaultRepoScope` is the "no-selection" default.** If the UI sends no `repoScope`, the backend uses this list. If the field is absent from config, the default falls back to all tenant repos. This field exists because in production a tenant with eight repos should not accidentally broadcast every question across all eight.
 
 **The system prompt is per-tenant.** Different products need different instructions. WPForms wants awareness of WordPress hooks and filters; MonsterInsights needs Google Analytics API patterns.
 
@@ -434,6 +506,88 @@ Each team gets a single JSON file. Adding a new team means adding one file — n
 
 ---
 
+## Cross-Repo Isolation and Per-Repo Scoping
+
+A tenant may own many repos. A single support question must only ever run against the repos the agent selects for that question. This is not a UX nicety — it is a correctness and trust requirement. When an agent is troubleshooting a Beacon ticket, the assistant must never quote code from an unrelated product the same team happens to own, and must never "search widely" for an answer and pick up context that is off-topic and confusing.
+
+### The three-layer scoping gate
+
+Scoping is enforced at three independent layers. No single layer is trusted to be the only one that holds the line.
+
+```
+Layer 1 — Request validation
+    ChatRequest.repoScope?: string[]   (array of "owner/name")
+    repoScope.service.ts validates every entry is in tenant.repos.
+    Any unknown entry → ValidationError → 400 response.
+    Omitted → fall back to tenant.defaultRepoScope, then to all tenant repos.
+
+Layer 2 — Prompt construction
+    repoMap.service.renderForScope(tenant, allowedRepos) emits ONLY the
+    scoped repos' outlines into the system prompt. The model literally
+    does not see the existence of out-of-scope repos for this turn.
+
+Layer 3 — Tool execution
+    Every tool (readFile, searchCode, findSymbol, createIssue,
+    searchIssues) re-validates its `repo` argument against the
+    allowedRepos set passed in by the agent loop. If the model
+    hallucinates a repo name, or if a prompt-injection payload inside
+    a file tells the model to "read /etc/secret-repo", the tool
+    returns an error string to the model. No GitHub call is ever made
+    for an out-of-scope repo.
+```
+
+### Why three layers and not one
+
+Layer 1 alone is not enough: if a later refactor introduced a second place that accepted repo names, it might skip the check. Layer 2 alone is not enough: a sufficiently clever injection could tell the model a repo name it hasn't been told about. Layer 3 alone is not enough: we want unknown repo names rejected at the edge of the request, not tolerated and silently dropped at the tool layer. All three are cheap, and all three are tested.
+
+### API contract
+
+```ts
+// packages/shared/src/api-contracts.ts
+ChatRequestSchema = z.object({
+  sessionId: z.string().uuid(),
+  message: z.string().min(1).max(4000),
+  repoScope: z.array(z.string().regex(/^[^/]+\/[^/]+$/)).optional(),
+});
+
+ChatResponseSchema = z.object({
+  sessionId: z.string().uuid(),
+  answer: z.string(),
+  reposScoped: z.array(z.string()),        // what the backend allowed this turn
+  reposTouched: z.array(z.string()),       // what the model actually used
+  filesReferenced: z.array(ChatCitationSchema), // { repo, path, lineStart?, lineEnd? }
+  toolCalls: z.array(ToolCallSchema).optional(),
+});
+
+TenantReposResponseSchema = z.object({
+  repos: z.array(z.object({
+    owner: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    defaultBranch: z.string(),
+    isDefault: z.boolean(), // true if this repo is in tenant.defaultRepoScope
+  })),
+});
+```
+
+### UI: the repo picker
+
+A multi-select pill row sits immediately above the chat input. On session start the UI calls `GET /api/v1/tenant/repos` once and renders one pill per repo. Pills marked `isDefault: true` are pre-selected. The agent can toggle pills at any point; every outgoing `POST /api/v1/chat` sends the current selection as `repoScope`. The selection is session-scoped (resets when the tab closes) — deliberately, to prevent accidental reuse of an old scope on a new ticket.
+
+In the embed/widget build, the picker can also be pre-set by an HTML attribute (`repo-scope="owner/a,owner/b"`) so that when the widget is dropped into a ticket view for a specific product the default scope matches the product.
+
+### Testing
+
+See the Testing Strategy section below. The `repoScope` isolation suite includes:
+
+- ValidationError when `repoScope` names a repo outside `tenant.repos`
+- ValidationError when `repoScope` names a repo belonging to a *different* tenant
+- Agent-loop test: a tool call with a `repo` argument not in `allowedRepos` returns an error string to the model and does NOT hit GitHub (asserted via mock)
+- System-prompt snapshot test: out-of-scope repos do not appear in the rendered map fragment
+- Full integration test: authenticate as tenant A, send `repoScope: ["tenant-b/private-repo"]` → 400, no log entry that leaks the attempted repo name
+
+---
+
 ## Database Schema
 
 ```sql
@@ -480,9 +634,30 @@ CREATE TABLE api_keys (
 );
 
 CREATE INDEX idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
+
+-- 002_repo_maps.sql — added in Phase 2 when the agent loop + repo map land.
+-- One row per (tenant_id, repo_full_name). Upserted on commit via webhook or
+-- cron. `content` is the tree-sitter-rendered text outline; it is bounded in
+-- size (symbols only, not file contents) and safe to embed wholesale in the
+-- LLM's system prompt.
+CREATE TABLE repo_maps (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id       TEXT NOT NULL,
+  repo_full_name  TEXT NOT NULL,           -- "owner/name"
+  default_branch  TEXT NOT NULL,
+  head_sha        TEXT NOT NULL,           -- commit SHA the map was built from
+  content         TEXT NOT NULL,           -- rendered map (signatures + line ranges)
+  symbol_count    INTEGER NOT NULL,
+  built_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (tenant_id, repo_full_name)
+);
+
+CREATE INDEX idx_repo_maps_tenant ON repo_maps(tenant_id);
 ```
 
 **Why `deleted_at` from day one:** AM handles customer support data. The retention column costs nothing to add now and avoids a painful schema migration later when compliance asks for a data purge policy.
+
+**Why the repo map lives in Postgres, not in memory or on disk:** a Render web service restarts frequently (free tier cold starts, auto-deploys). An in-memory cache would be rebuilt on every restart, wasting minutes against GitHub's API. On-disk files would not survive a deploy. Postgres is already a dependency; one more table is free.
 
 ---
 
@@ -542,18 +717,21 @@ When this moves to full AM deployment, the hosting decisions shift but the archi
 
 ## Trade-off Analysis
 
-| Dimension | MCP Approach (chosen) | RAG / Vector DB Approach |
-|---|---|---|
-| **Setup complexity** | Low — point at repos, authenticate, done | High — build indexing pipeline, choose vector DB, tune chunking |
-| **Maintenance** | Near-zero — MCP reads live code | Ongoing — re-index on every push, monitor staleness |
-| **Cost per query** | Higher — reads files on each question | Lower per query — embeddings are pre-computed |
-| **Speed on large repos** | Slower — searches at query time | Faster — similarity search is near-instant |
-| **Accuracy** | Reads actual current code | Can serve stale chunks if indexing lags |
-| **Infrastructure** | Just the API server | API server + vector DB + indexing workers |
+| Dimension | Repo Map + Agent Loop (chosen) | RAG / Vector DB | Keyword Search Only (rejected in Phase 1) |
+|---|---|---|---|
+| **Natural-language questions** | Yes — the model navigates using the map | Yes | No — AND-semantics keyword matching |
+| **Setup complexity** | Low — one tree-sitter pass per repo, stored as text | High — embeddings pipeline, vector store, chunk strategy | Trivial |
+| **Maintenance** | Refresh map on commit (webhook or cron) — cheap | Re-index on every push, monitor chunk staleness | None |
+| **Cost per query** | Medium — tool calls iterate; caps bound it | Low — pre-computed similarity | Very low but answers are wrong for this use case |
+| **Speed on large repos** | Good — map is bounded by symbol count, not LOC | Fastest — near-instant similarity search | Fast |
+| **Accuracy for support Q&A** | High — model reads exact lines on demand | Medium — chunk boundaries can split relevant code | Low — misses any question lacking the right keywords |
+| **Infrastructure beyond app + DB** | None | Vector DB + indexing workers | None |
+| **Handles GitHub indexing lag** | Yes — we own the map | Yes — we own the embeddings | No — blocked by GitHub's private indexer |
+| **Exact file + line citations** | Yes — tool returns ranges | Sometimes — depends on chunker | No |
 
-**Why MCP wins for this use case:** AM repos are product-sized (not monorepo-massive), query volume is support-team-level (not thousands per minute), and the maintenance burden of a RAG pipeline is not justified when the MCP gives live, always-current results with almost no infrastructure.
+**Why repo map + agent loop wins:** it matches Cursor's retrieval pattern (which is proven in the wild), avoids the operational cost of a vector DB, survives the GitHub code-search index lag that blocked Phase 1, and produces Cursor-quality answers with exact file and line citations. The map is small (tens of KB per repo), regenerates in seconds, and fits comfortably inside a single Postgres row per repo.
 
-**When to revisit:** If query latency becomes a problem (agents waiting 10+ seconds) or if you expand to very large monorepos, add a caching or embedding layer on top of the MCP — supplementing it, not replacing it.
+**When to revisit:** if a single repo grows so large that its map exceeds the model's usable context window (order of 100k+ symbols), switch that tenant's `repoMap.service` rendering strategy from "full map in system prompt" to "search the map over a tool call" — a one-service change, not a pipeline rewrite.
 
 ---
 
@@ -573,7 +751,10 @@ When this moves to full AM deployment, the hosting decisions shift but the archi
 
 **What to revisit later:**
 
-- Streaming responses (start showing the answer while Claude is still generating)
+- Streaming responses (start showing the answer while the model is still generating, including streaming tool-call progress)
+- Webhook-triggered repo map refresh (currently the plan assumes cron; a GitHub push webhook makes it instant and removes the "is this map stale?" worry)
+- Semantic search tool (add a sixth tool backed by a small embedding store — only if a customer repo grows past the map-in-prompt ceiling)
+- Per-user ACLs within a tenant (agent X can only scope to repos A, B; agent Y to C, D) — the picker already hides everything, this only extends the three-layer gate
 - Feedback loop (thumbs up/down on answers, logged to `analytics_events` — schema already supports it)
 - Analytics dashboard (query `analytics_events` table; data is already there from day one)
 
@@ -581,134 +762,28 @@ When this moves to full AM deployment, the hosting decisions shift but the archi
 
 ## Action Items
 
-### Phase 1: Backend + Chat (Days 1–3)
+The day-by-day commit plan lives in **[EXECUTION.md](./EXECUTION.md)** and is the single source of truth for what ships when. This document describes *what* the system is; `EXECUTION.md` describes *how and when* it gets built, commit by commit, with security-review checkpoints between batches.
 
-```
-Day 1 — Project setup + foundations
-  ├── Initialize the monorepo (npm workspaces): packages/server, packages/shared
-  ├── Scaffold packages/server with Express or Fastify + Pino logger
-  ├── Scaffold packages/shared with api-contracts.ts (empty stub, populated as routes are built)
-  ├── Create .env.example with: APP_MODE, DATABASE_URL, CLAUDE_API_KEY, DRAFT_TOKEN_SECRET,
-  │     SENTRY_DSN, LOG_LEVEL, plus example ${TEAM_ALPHA_GH_TOKEN}
-  ├── Create docker-compose.yml (server + local Postgres)
-  ├── Create db/migrations/001_init.sql (conversations + analytics_events + api_keys)
-  ├── Create scripts/migrate.ts and verify `npm run migrate` works against local Postgres
-  ├── Create config/appMode.ts (typed enum reading APP_MODE)
-  ├── Create shared/errors/domainErrors.ts (NotFoundError, ValidationError, ForbiddenError, ConflictError, RateLimitError)
-  ├── Create infrastructure/logger.ts (Pino, JSON output, includes request_id/tenant_id/session_id)
-  ├── Create infrastructure/errorTracker.ts (Sentry init — no-op if SENTRY_DSN unset)
-  ├── Create tenants/_template.json and tenants/team-alpha.json (your public repo)
-  ├── Wire middleware in order: cors → auth → tenantResolver → rateLimiter → routes → errorHandler
-  ├── Implement routes/health.ts (returns status + appMode + DB check)
-  ├── Create .github/workflows/ci.yml (lint + typecheck + tests)
-  ├── Create .github/workflows/secret-scan.yml (blocks raw GH tokens in tenants/*.json)
-  └── Deploy health check to Railway, verify it returns appMode: "prototype"
+Phase summary:
 
-Day 2 — Infrastructure + repository layers
-  ├── Implement infrastructure/supabaseClient.ts (singleton init)
-  ├── Implement infrastructure/githubMcp.ts (search files, read contents)
-  ├── Implement infrastructure/llm/types.ts (LlmProvider interface)
-  ├── Implement infrastructure/llm/claudeProvider.ts (Anthropic SDK; uses `system` param)
-  ├── Implement infrastructure/llm/openaiProvider.ts (OpenAI SDK; system role first)
-  ├── Implement infrastructure/llm/geminiProvider.ts (Google AI SDK; systemInstruction field)
-  ├── Implement infrastructure/llm/llmFactory.ts (returns provider based on tenant.ai.provider)
-  ├── Each provider enforces tenant.ai.dailySpendCapUsd internally
-  ├── Implement repositories/conversation.repository.ts (getHistory, saveMessage)
-  ├── Implement repositories/analytics.repository.ts (logEvent — includes provider name in metadata)
-  ├── Implement repositories/apiKey.repository.ts (storeKeyHash, findByKeyHash)
-  └── Unit test each infrastructure client against its real service
-
-Day 3 — Service + route layers
-  ├── Implement services/aiService.ts (orchestrate: history → search → Claude → save)
-  ├── Implement services/apiKeyService.ts (generate, hash, verify)
-  ├── Implement scripts/createApiKey.ts (CLI: prints plaintext key once, stores hash)
-  ├── Populate shared/api-contracts.ts with /chat request + response Zod schemas
-  ├── Implement routes/chat.ts (thin: validate via contract, call aiService, let errors bubble)
-  └── Test via curl — ask questions, verify answers reference real files
-```
-
-**Milestone:** `curl` your Railway URL with a question about your repo and get a code-grounded answer.
-
-### Phase 2: Frontend Chat UI (Days 4–5)
-
-```
-Day 4 — Chat frontend (BOTH entry points built today)
-  ├── Scaffold packages/frontend with Vite + React + TypeScript
-  ├── Create .env.example (VITE_API_URL, VITE_TENANT_ID, VITE_API_KEY)
-  ├── Implement config.ts — reads from .env OR from web component HTML attributes
-  │     (this is the key that makes both entry points share the same components)
-  ├── Implement services/apiClient.ts (all backend calls in one place)
-  ├── Implement useSession hook (generates UUID, persists in localStorage)
-  ├── Implement useChat hook (message state, calls apiClient)
-  ├── Build ChatWindow, MessageBubble, InputBar, CodeSnippet components
-  │     (enforce: no document.body, no window globals, no hardcoded URLs)
-  ├── Write main.tsx — renders <ChatWindow> into <div id="root"> (prototype entry)
-  ├── Write widget.tsx — defines <codebase-assistant> custom element, mounts
-  │     <ChatWindow> into Shadow DOM, reads apiUrl/tenantId/apiKey from attributes
-  ├── Configure vite.config.ts with two build targets:
-  │     - app build → full Vite SPA (for prototype / Vercel deploy)
-  │     - lib build → single codebase-assistant.js file (for embedding)
-  └── Verify lib build produces a file that works when dropped into an HTML page
-        with <script src="codebase-assistant.js"></script>
-        and <codebase-assistant api-url="..." tenant-id="..." api-key="..."></codebase-assistant>
-
-Day 5 — Polish and verify (both modes)
-  ├── Add loading state (typing indicator while Claude thinks)
-  ├── Add error handling (network failures, rate limit responses)
-  ├── Style it clean — functional enough to demo, not over-designed
-  ├── Test full-page mode: open Vercel URL → ask question → get answer → check Supabase row
-  ├── Test embed mode: drop the lib build script into a plain HTML file,
-  │     verify the widget renders and works identically to the full-page version
-  └── Share Vercel URL with a teammate — get a real person's first impression
-```
-
-**Milestone:** Anyone on your team opens a URL, types a question, gets a code-grounded answer. Conversation is saved in Supabase.
-
-### Phase 3: Issue Drafting (Days 6–7)
-
-```
-Day 6 — Issue draft backend
-  ├── Add issue templates to tenant config (or read from .github/ISSUE_TEMPLATE/)
-  ├── Implement services/issueFormatter.ts (Claude fills template fields from agent input)
-  ├── Implement infrastructure/issueCreator.ts (GitHub Issues API write)
-  ├── Implement services/issueService.ts (orchestrate: format → find files → generate draft token → create)
-  ├── Implement routes/issues.ts (/draft returns filled template + draft token; /create validates token)
-  └── Test via curl — send bug details, get back filled template + token
-
-Day 7 — Issue draft frontend
-  ├── Add ModeToggle component (Ask Question ↔ Draft Issue)
-  ├── Implement useIssueDraft hook (form state, calls apiClient)
-  ├── Build IssueDraftPreview component (editable preview of filled template)
-  ├── Add "Create Issue" button → calls /create with draft token + any edits
-  └── Show created issue URL in the chat
-```
-
-**Milestone:** Agent describes a problem → tool drafts a structured issue with file references → agent reviews and hits Create → issue appears in GitHub.
-
-### Phase 4: Multi-Tenant + Production Switch (Day 8+)
-
-```
-  ├── Add a second tenant config (tenants/team-beta.json) for a different repo
-  ├── Run `npm run create-api-key --tenant team-alpha` and `--tenant team-beta`
-  ├── Set allowedOrigins per tenant in tenants/*.json
-  ├── Set production rateLimits per tenant in tenants/*.json
-  ├── Write tests/tenantIsolation.test.ts (cross-tenant access attempts → all rejected)
-  ├── Write Playwright E2E suite (chat, draft, create, auth, embed) against staging URL
-  ├── Wire feedback: thumbs up/down in UI logs to analytics_events
-  ├── Write docs/onboarding.md (the 5-step team self-service guide)
-  ├── Write docs/production-deploy.md (the 8-step prototype → production switch)
-  └── Flip APP_MODE=production in Railway, verify health check confirms it
-```
-
-**Milestone:** Two isolated tenants. Basic analytics in Supabase. Any AM team can read the onboarding doc and add themselves.
+- **Phase 1 (shipped)** — Backend + `/chat` endpoint with Phase-1 retrieval (GitHub `/search/code`). Security review passed. Live on Render + Supabase. Proved that keyword search is insufficient, motivating the pivot below.
+- **Phase 2 (pivot)** — Replace keyword-search retrieval with repo map + agent loop. Add per-repo scoping (the three-layer gate). Build frontend (full-page prototype and embeddable widget) with repo picker UI.
+- **Phase 3** — Issue creation as a tool call. No separate route surface; the agent loop handles the preview-then-create flow in-chat.
+- **Phase 4** — Multi-tenant hardening (tenant + cross-repo isolation tests, Playwright E2E, feedback loop, docs) and `APP_MODE=production` flip.
 
 ---
 
 ## What "Done" Looks Like for the Prototype
 
-You have a URL. You open it. You type "Why does the form submission fail when the honeypot field is empty?" and it searches your actual repo, finds the relevant handler, and explains what the code does and where to look. You switch to Draft Issue mode, describe the bug, and it produces a properly formatted GitHub issue with the right template fields filled in and a "Suggested Code Areas" section pointing to specific files. You click Create, and the issue appears in your repo.
+You have a URL. You open it. You see a repo picker with your team's repos pre-selected. You type:
 
-The whole conversation is saved in Supabase with a `deleted_at` column ready for retention enforcement. Usage events are in `analytics_events`. The code is in the right layers. Adding a second tenant is a config file and two env vars — no code changes.
+> "Can a customer on a trial plan get leads sent to their email provider when the Resource Library opt-in is filled?"
+
+The assistant navigates the repo map, calls `readFile` on the exact handler it finds, and replies with an explanation citing `MailProviderRepository.php:432-454` and `integrations.php:1-5` — with the relevant code pasted inline. You say "file a bug for the missing consent fallback." The assistant calls `searchIssues` to check for duplicates, then `createIssue` against the team's issue repo, and pastes the resulting issue URL back into the chat.
+
+You untick the Beacon repos and tick OptinMonster, ask an OptinMonster question, and the previous repo's code is nowhere in the next answer — the model has not been told of its existence for this turn.
+
+The whole conversation is saved in Supabase with a `deleted_at` column ready for retention enforcement. Usage events — including tool-call counts and scoped repo lists — are in `analytics_events`. The code is in the right layers. Adding a second tenant is a config file and two env vars — no code changes.
 
 That is what "prototype done" means on this project.
 
@@ -762,13 +837,13 @@ Returns:
   "appMode": "prototype",
   "checks": {
     "database": "ok",
-    "claude": "skipped",   // only checked on /health/deep
-    "github_mcp": "skipped"
+    "llm_provider": "skipped",   // only checked on /health/deep
+    "github": "skipped"
   }
 }
 ```
 
-Railway and load balancers hit this. A `GET /api/v1/health/deep` variant additionally pings Claude and GitHub MCP — used for manual diagnosis, not for liveness probes (those external pings cost money and time).
+Render and load balancers hit this. A `GET /api/v1/health/deep` variant additionally pings the tenant's LLM provider and GitHub — used for manual diagnosis, not for liveness probes (those external pings cost money and time).
 
 ### Per-tenant API key generation
 
@@ -823,22 +898,36 @@ One test file per service/repository file. These never hit the network — all e
 - **Throws if a raw `ghp_` or `github_pat_` string is present in the config** — this is your programmatic secret-scan, not just a CI hook
 
 **`services/aiService.test.ts`**
-- Calls `conversationRepository.getHistory()` then `githubMcp` then `llmFactory.getProvider().sendMessage()` in that order
-- Does not call the provider if `githubMcp` throws
-- Passes the tenant's own `systemPrompt` to the provider — not a hardcoded default
-- Calls `llmFactory.getProvider(tenant.ai)` — the service never imports a vendor SDK directly
+- Calls `repoScope.service.validate()` first, before any DB or LLM work
+- Calls `conversationRepository.getHistory()` before the agent loop
+- Calls `repoMap.service.renderForScope()` with exactly the scoped repos — never all tenant repos when a narrower scope was sent
+- Delegates to `agentLoop.service.run()` — does not talk to tools or providers directly
 - Saves both question and answer via `conversationRepository.saveMessage()`
-- Logs a query event via `analyticsRepository.logEvent()` including which provider was used
+- Logs a query event via `analyticsRepository.logEvent()` including provider, model, tool-call count, scoped repo count
 
-**`services/issueService.test.ts`**
-- Draft returns a signed token alongside the filled template
-- `issueCreator` (infrastructure) is NOT called during `/draft` — only during `/create`
-- `/create` rejects an expired draft token
-- `/create` rejects a draft token that was issued for a different tenant
+**`services/repoScope.service.test.ts`**
+- Empty `repoScope` → returns `tenant.defaultRepoScope`, falling back to all tenant repos if unset
+- `repoScope` with unknown entry → throws `ValidationError`
+- `repoScope` with a repo belonging to a different tenant → throws `ValidationError` (tested with two tenant fixtures)
+- Returns a frozen array — callers cannot mutate it
 
-**`services/issueFormatter.test.ts`**
-- Given raw agent input, produces a structured object with all template fields populated
-- Handles partial Claude output gracefully — returns what was filled, does not throw
+**`services/agentLoop.service.test.ts`**
+- Respects `MAX_TURNS` (default 8) — stops iterating and returns partial result with a marker
+- Tool dispatcher rejects any tool call whose `repo` is not in `allowedRepos` — asserted by mocking the tool and checking it was NOT invoked
+- Returns the final message, list of files cited, and tool-call trace
+- Propagates provider errors; does not swallow them
+- Tracks cumulative token usage across tool-calling turns
+
+**`services/repoMap.service.test.ts`**
+- `build()` calls `treeSitter.parse()` for each file fetched from `githubClient`, upserts the result via `repoMap.repository.upsertMap()`
+- `renderForScope()` returns only the scoped repos' content — a snapshot test proves out-of-scope repos are absent from the rendered text
+- `refresh()` is idempotent — calling it twice in a row with the same HEAD SHA is a no-op
+
+**`services/tools/*.tool.test.ts`** (one file per tool)
+- Each tool re-validates its `repo` argument against the passed-in `allowedRepos` set
+- `readFile.tool`: ranges beyond file length are clamped; binary files return an explicit "binary file" error string instead of raw bytes
+- `createIssue.tool`: validates `targetRepo` matches `tenant.issueConfig.targetRepo` (issue creation is scoped tighter than reads); uses the `issues:write` token, never the read token
+- `searchIssues.tool`: only queries the target repo; returns truncated titles + URLs, never full issue bodies
 
 **`repositories/conversation.repository.test.ts`** (mocked Supabase client)
 - `saveMessage()` always includes `tenant_id` — never saves a row without it
@@ -912,14 +1001,20 @@ These run against a real local Postgres spun up by `docker-compose.yml`. They ru
 
 ---
 
-### Tenant Isolation Tests — `packages/server/tests/tenantIsolation.test.ts`
+### Tenant Isolation + Cross-Repo Isolation Tests — `packages/server/tests/isolation.test.ts`
 
 Written in Phase 4. These are the most important tests in the project. If any of these fail, the tool is a liability.
 
+**Cross-tenant:**
 - Authenticated as tenant A, send `{ tenantId: "team-beta" }` in the request body → server uses tenant A's config (from auth), not team-beta's
 - Use tenant A's API key with a `sessionId` that belongs to tenant B → `getHistory()` returns empty, not tenant B's messages
-- Draft token generated for tenant A → cannot be used on `/create` when authenticated as tenant B
-- Direct DB assertion after tenant A's session: every row in `conversations` has `tenant_id = "team-alpha"` — no null or missing values
+- Direct DB assertion after tenant A's session: every row in `conversations` and `repo_maps` has `tenant_id = "team-alpha"` — no null or missing values
+
+**Cross-repo within a tenant:**
+- Send `repoScope: ["tenant-b/private-repo"]` from tenant A → 400 `ValidationError`, zero rows written to `conversations`, zero log lines that contain the attempted repo name verbatim
+- Send `repoScope: ["team-alpha/repo-a"]` but the model then calls `readFile` with `repo: "team-alpha/repo-b"` → the tool returns the dispatcher's rejection string to the model; assertion that `githubClient.readFile` was never called
+- Full-pipeline: send a question with `repoScope: ["team-alpha/repo-a"]` and assert the rendered system prompt contains no mention of `team-alpha/repo-b` (regex search on the captured prompt)
+- Issue creation: model tries to `createIssue` against a repo that is in `tenant.repos` but NOT `tenant.issueConfig.targetRepo` → tool rejects; `issueCreator` was not called
 
 ---
 
@@ -974,11 +1069,13 @@ Run manually after each phase milestone. Run automatically in CI before any depl
 
 | Day | Tests written |
 |---|---|
-| Day 1 | `config/tenants.test.ts`, `config/appMode.test.ts`, `middleware/auth.test.ts`, `middleware/tenantResolver.test.ts`, `middleware/errorHandler.test.ts`, `routes/health.test.ts` |
-| Day 2 | `services/aiService.test.ts`, `services/promptInjection.test.ts` (parametrized × 3 providers), `infrastructure/llm/llmFactory.test.ts`, one spend-cap test per provider |
-| Day 3 | `middleware/rateLimiter.test.ts`, `repositories/conversation.repository.test.ts`, `repositories/conversation.repository.integration.test.ts`, `services/apiKeyService.test.ts` (hash + verify roundtrip) |
-| Day 4 | `frontend/widget.test.ts`, contract tests on both sides of `shared/api-contracts.ts` |
-| Day 6 | `services/issueService.test.ts`, `services/issueFormatter.test.ts` |
-| Phase 4 | `tests/tenantIsolation.test.ts`, full Playwright E2E suite (incl. embed.spec.ts) |
+| Day 1 ✓ shipped | `config/tenants.test.ts`, `config/appMode.test.ts`, `middleware/auth.test.ts`, `middleware/tenantResolver.test.ts`, `middleware/errorHandler.test.ts`, `routes/health.test.ts` |
+| Day 2 ✓ shipped | `infrastructure/llm/*` tests per provider, `llmFactory.test.ts`, spend-cap tests, repo tests (conversation, analytics, apiKey) |
+| Day 3 ✓ shipped | `services/aiService.test.ts` (Phase 1 version), `services/promptInjection.test.ts` (parametrized × 3), `services/apiKeyService.test.ts`, `routes/chat.route.test.ts` |
+| Day 4 (pivot start) | `infrastructure/treeSitter.test.ts`, `repositories/repoMap.repository.test.ts` (unit + integration), `services/repoMap.service.test.ts` |
+| Day 5 | `services/repoScope.service.test.ts`, `services/agentLoop.service.test.ts`, `services/tools/*.tool.test.ts`, updated `llm/*Provider.test.ts` for tool calling |
+| Day 6 | `services/tools/createIssue.tool.test.ts`, `services/tools/searchIssues.tool.test.ts`, updated `routes/chat.route.test.ts` for `repoScope`, new `routes/tenantRepos.route.test.ts` |
+| Day 7 | `frontend/RepoPicker.test.tsx`, `frontend/widget.test.ts`, contract tests on both sides of `shared/api-contracts.ts` |
+| Phase 4 | `tests/isolation.test.ts` (tenant + cross-repo), full Playwright E2E suite (incl. repo-picker coverage and embed) |
 
-The one test that is a hard blocker before any AM team goes live: **tenant isolation**. One team seeing another team's conversation history or repo results is a showstopper. Every other test category is important; this one cannot be skipped.
+The two tests that are hard blockers before any AM team goes live: **tenant isolation** AND **cross-repo isolation within a tenant**. One team seeing another team's conversation history, or one product's question picking up an unrelated repo's code, are both showstoppers. Every other test category is important; these two cannot be skipped.
