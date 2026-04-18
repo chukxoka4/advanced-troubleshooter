@@ -60,6 +60,76 @@ describe("geminiProvider", () => {
     ).rejects.toBeInstanceOf(SpendCapExceededError);
   });
 
+  it("sendMessageWithTools forwards functionDeclarations and decodes functionCall", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { functionCall: { name: "readFile", args: { path: "a.ts" } } },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 3 },
+      }),
+    );
+    const provider = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini-1.5-pro",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const result = await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [
+        {
+          name: "readFile",
+          description: "read",
+          jsonSchema: { type: "object", properties: { path: { type: "string" } } },
+        },
+      ],
+    });
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.tools[0].functionDeclarations[0].name).toBe("readFile");
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.toolCalls[0]).toMatchObject({ name: "readFile", arguments: { path: "a.ts" } });
+  });
+
+  it("sendMessageWithTools enforces spend cap", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 5_000_000, candidatesTokenCount: 5_000_000 },
+      }),
+    );
+    const provider = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini",
+      dailySpendCapUsd: 2,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [],
+    });
+    await expect(
+      provider.sendMessageWithTools({
+        systemPrompt: "s",
+        history: [],
+        userMessage: "u",
+        tools: [],
+      }),
+    ).rejects.toBeInstanceOf(SpendCapExceededError);
+  });
+
   it("throws on non-2xx", async () => {
     const fetchImpl = vi.fn(async () => new Response("boom", { status: 400 }));
     const provider = createGeminiProvider({
