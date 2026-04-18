@@ -111,8 +111,117 @@ export function createOpenAiProvider(options: OpenAiProviderOptions): LlmProvide
       return { content, usage, estimatedCostUsd: cost };
     },
 
-    async sendMessageWithTools(_opts: SendMessageWithToolsOptions): Promise<ToolCallingResult> {
-      throw new Error("openaiProvider.sendMessageWithTools: not implemented");
+    async sendMessageWithTools(opts: SendMessageWithToolsOptions): Promise<ToolCallingResult> {
+      tracker.assertWithinCap();
+      const messages: Array<Record<string, unknown>> = [
+        { role: "system", content: opts.systemPrompt },
+        ...opts.history.map(toOpenAiMessage),
+        { role: "user", content: opts.userMessage },
+      ];
+      if (opts.priorToolCalls && opts.priorToolCalls.length > 0) {
+        messages.push({
+          role: "assistant",
+          content: null,
+          tool_calls: opts.priorToolCalls.map((c) => ({
+            id: c.id,
+            type: "function",
+            function: { name: c.name, arguments: JSON.stringify(c.arguments) },
+          })),
+        });
+      }
+      if (opts.toolResults && opts.toolResults.length > 0) {
+        for (const r of opts.toolResults) {
+          messages.push({
+            role: "tool",
+            tool_call_id: r.toolCallId,
+            content: r.content,
+          });
+        }
+      }
+
+      const body = {
+        model: options.model,
+        max_tokens: opts.maxOutputTokens ?? 1024,
+        messages,
+        tools: opts.tools.map((t) => ({
+          type: "function",
+          function: { name: t.name, description: t.description, parameters: t.jsonSchema },
+        })),
+      };
+
+      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${options.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`openai api ${response.status}: ${text}`);
+      }
+      const data = (await response.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string | null;
+            tool_calls?: Array<{
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+          finish_reason?: string;
+        }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content ?? "";
+      const rawToolCalls = choice?.message?.tool_calls ?? [];
+      const toolCalls = rawToolCalls
+        .filter((tc) => typeof tc.id === "string" && typeof tc.function?.name === "string")
+        .map((tc) => {
+          let args: Record<string, unknown> = {};
+          try {
+            args = tc.function?.arguments ? (JSON.parse(tc.function.arguments) as Record<string, unknown>) : {};
+          } catch {
+            args = {};
+          }
+          return {
+            id: tc.id as string,
+            name: tc.function?.name as string,
+            arguments: args,
+          };
+        });
+
+      const finish = choice?.finish_reason;
+      const stopReason: ToolCallingResult["stopReason"] =
+        finish === "tool_calls" || toolCalls.length > 0
+          ? "tool_use"
+          : finish === "length"
+            ? "max_tokens"
+            : finish === "stop"
+              ? "end_turn"
+              : "other";
+
+      const promptTokens = data.usage?.prompt_tokens ?? 0;
+      const completionTokens = data.usage?.completion_tokens ?? 0;
+      const usage: TokenUsage = {
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+      };
+      const cost =
+        (promptTokens * pricing.inputPerMTokUsd) / 1_000_000 +
+        (completionTokens * pricing.outputPerMTokUsd) / 1_000_000;
+      totals = {
+        promptTokens: totals.promptTokens + usage.promptTokens,
+        completionTokens: totals.completionTokens + usage.completionTokens,
+        totalTokens: totals.totalTokens + usage.totalTokens,
+      };
+      tracker.record(cost);
+
+      return { content: content ?? "", toolCalls, stopReason, usage, estimatedCostUsd: cost };
     },
 
     getUsage: () => ({ ...totals }),

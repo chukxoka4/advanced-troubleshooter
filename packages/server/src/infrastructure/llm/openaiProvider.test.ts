@@ -61,6 +61,88 @@ describe("openaiProvider", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("sendMessageWithTools forwards tool schema and decodes tool_calls", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "readFile", arguments: '{"path":"a.ts"}' },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 5, completion_tokens: 5 },
+      }),
+    );
+    const provider = createOpenAiProvider({
+      apiKey: "sk",
+      model: "gpt-4o",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const result = await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [
+        {
+          name: "readFile",
+          description: "read",
+          jsonSchema: { type: "object", properties: { path: { type: "string" } } },
+        },
+      ],
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.tools[0].function.name).toBe("readFile");
+    expect(body.tools[0].function.parameters).toEqual({
+      type: "object",
+      properties: { path: { type: "string" } },
+    });
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.toolCalls).toEqual([
+      { id: "call_1", name: "readFile", arguments: { path: "a.ts" } },
+    ]);
+  });
+
+  it("sendMessageWithTools enforces spend cap", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 },
+      }),
+    );
+    const provider = createOpenAiProvider({
+      apiKey: "sk",
+      model: "gpt-4o",
+      dailySpendCapUsd: 5,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [],
+    });
+    await expect(
+      provider.sendMessageWithTools({
+        systemPrompt: "s",
+        history: [],
+        userMessage: "u",
+        tools: [],
+      }),
+    ).rejects.toBeInstanceOf(SpendCapExceededError);
+  });
+
   it("throws on non-2xx responses", async () => {
     const fetchImpl = vi.fn(async () => new Response("nope", { status: 429 }));
     const provider = createOpenAiProvider({
