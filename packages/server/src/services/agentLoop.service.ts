@@ -163,13 +163,16 @@ export function createAgentLoop(deps: AgentLoopDeps): {
 
         const nextResults: ToolResult[] = [];
         for (const call of response.toolCalls) {
-          calls.push({ name: call.name, arguments: call.arguments, ok: false });
-          const record = calls[calls.length - 1] as AgentLoopToolCallRecord;
-
-          if (calls.length > maxToolCalls) {
+          // Fencepost: check the cap BEFORE recording the call, so
+          // maxToolCalls is a true upper bound on accepted invocations.
+          if (calls.length >= maxToolCalls) {
             capReached = true;
-            record.ok = false;
-            record.errorMessage = "tool-call cap exceeded";
+            calls.push({
+              name: call.name,
+              arguments: call.arguments,
+              ok: false,
+              errorMessage: "tool-call cap exceeded",
+            });
             nextResults.push({
               toolCallId: call.id,
               name: call.name,
@@ -178,6 +181,9 @@ export function createAgentLoop(deps: AgentLoopDeps): {
             });
             continue;
           }
+
+          calls.push({ name: call.name, arguments: call.arguments, ok: false });
+          const record = calls[calls.length - 1] as AgentLoopToolCallRecord;
 
           const tool = toolsByName.get(call.name);
           if (!tool) {
@@ -242,6 +248,14 @@ export function createAgentLoop(deps: AgentLoopDeps): {
           // loop once more so the model can close out with the partial marker
           continue;
         }
+      }
+
+      // If the loop exhausted its turns after hitting the tool-call cap but
+      // never got a clean end_turn, surface the partial marker rather than
+      // returning an empty string — callers need to know the answer is
+      // incomplete.
+      if (finalAnswer === "" && capReached) {
+        finalAnswer = PARTIAL_MARKER;
       }
 
       return {

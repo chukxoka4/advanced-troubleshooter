@@ -297,6 +297,82 @@ describe("agentLoop.service", () => {
     expect(second.toolResults?.[0]?.content).not.toContain("<untrusted_tool_output>");
   });
 
+  it("maxToolCalls=2 allows exactly 2 invocations before forcing exit", async () => {
+    const execute = vi.fn(async () => "ok");
+    const tool: ToolDefinition = {
+      name: "mock",
+      description: "",
+      jsonSchema: {},
+      execute,
+    };
+    const { provider } = providerScript([
+      {
+        content: "",
+        toolCalls: [
+          tc("c1", "mock", { repo: "acme/a" }),
+          tc("c2", "mock", { repo: "acme/a" }),
+          tc("c3", "mock", { repo: "acme/a" }),
+        ],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+      {
+        content: "",
+        toolCalls: [tc("c4", "mock", { repo: "acme/a" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+    ]);
+    const result = await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [tool],
+      maxToolCalls: 2,
+    });
+    // Exactly 2 tool invocations executed; the 3rd (and any later) are cap-rejected.
+    expect(execute).toHaveBeenCalledTimes(2);
+    const okCount = result.toolCalls.filter((c) => c.ok).length;
+    expect(okCount).toBe(2);
+    expect(result.answer).toContain("tool-call cap reached");
+  });
+
+  it("cap + turn exhaustion returns PARTIAL_MARKER, not empty string", async () => {
+    const tool: ToolDefinition = {
+      name: "mock",
+      description: "",
+      jsonSchema: {},
+      execute: async () => "ok",
+    };
+    // maxTurns=2, maxToolCalls=1: turn 0 pushes cap-rejected call, turn 1
+    // pushes cap-rejected call too — loop exits because turn counter reaches
+    // maxTurns with no end_turn, finalAnswer stayed "".
+    const capTurn = {
+      content: "",
+      toolCalls: [tc(`c-${Math.random()}`, "mock", { repo: "acme/a" })],
+      stopReason: "tool_use" as const,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      estimatedCostUsd: 0,
+    };
+    const { provider } = providerScript([capTurn, { ...capTurn, toolCalls: [tc("x2", "mock", { repo: "acme/a" })] }]);
+    const result = await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [tool],
+      maxTurns: 2,
+      maxToolCalls: 0,
+    });
+    expect(result.answer).not.toBe("");
+    expect(result.answer).toContain("tool-call cap reached");
+  });
+
   it("exceeding maxToolCalls forces a final answer with partial marker", async () => {
     const tool: ToolDefinition = {
       name: "mock",
