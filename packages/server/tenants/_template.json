@@ -36,6 +36,9 @@
   "allowedOrigins": ["https://your-embedding-host.example"],
   "allowedUsers": ["agent-1@example.com"],
 
+  "$comment_defaultRepoScope": "Optional. Owner/name identifiers the assistant may reason about by default when the request does not supply its own repoScope. Every entry must match owner/name AND reference a repo declared above — validated at load time.",
+  "defaultRepoScope": ["your-github-org/your-repo-name"],
+
   "rateLimits": {
     "questionsPerMinute": 10,
     "issuesPerHour": 20

@@ -24,6 +24,7 @@
   "systemPrompt": "You are a support assistant for the advanced-troubleshooter prototype. Explain how the code works and where to look; do not suggest direct code edits. Reference file paths precisely.",
   "allowedOrigins": [],
   "allowedUsers": [],
+  "defaultRepoScope": ["chukxoka4/advanced-troubleshooter"],
   "rateLimits": {
     "questionsPerMinute": 30,
     "issuesPerHour": 20

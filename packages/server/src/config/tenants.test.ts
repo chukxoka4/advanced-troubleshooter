@@ -209,4 +209,51 @@ describe("loadTenants", () => {
       }),
     ).rejects.toThrow(ValidationError);
   });
+
+  it("allows an omitted defaultRepoScope (treated as undefined)", async () => {
+    await writeTenant("team-alpha.json", BASE_TENANT);
+    const loaded = await loadTenants({
+      dir,
+      env: { TEAM_ALPHA_GH_TOKEN: "x", TEAM_ALPHA_LLM_API_KEY: "y" },
+    });
+    expect(loaded.getTenant("team-alpha").defaultRepoScope).toBeUndefined();
+  });
+
+  it("accepts defaultRepoScope when every entry references a declared repo", async () => {
+    await writeTenant("team-alpha.json", {
+      ...BASE_TENANT,
+      defaultRepoScope: ["acme/widget"],
+    });
+    const loaded = await loadTenants({
+      dir,
+      env: { TEAM_ALPHA_GH_TOKEN: "x", TEAM_ALPHA_LLM_API_KEY: "y" },
+    });
+    expect(loaded.getTenant("team-alpha").defaultRepoScope).toEqual(["acme/widget"]);
+  });
+
+  it("rejects defaultRepoScope entries that are not owner/name shaped", async () => {
+    await writeTenant("team-alpha.json", {
+      ...BASE_TENANT,
+      defaultRepoScope: ["not-a-repo"],
+    });
+    await expect(
+      loadTenants({
+        dir,
+        env: { TEAM_ALPHA_GH_TOKEN: "x", TEAM_ALPHA_LLM_API_KEY: "y" },
+      }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects defaultRepoScope entries that do not reference a declared repo", async () => {
+    await writeTenant("team-alpha.json", {
+      ...BASE_TENANT,
+      defaultRepoScope: ["acme/other-repo"],
+    });
+    await expect(
+      loadTenants({
+        dir,
+        env: { TEAM_ALPHA_GH_TOKEN: "x", TEAM_ALPHA_LLM_API_KEY: "y" },
+      }),
+    ).rejects.toThrow(/does not reference a repo declared/);
+  });
 });

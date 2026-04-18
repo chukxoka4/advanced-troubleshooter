@@ -34,17 +34,42 @@ const RateLimitsSchema = z.object({
   issuesPerHour: z.number().positive(),
 });
 
-export const TenantConfigSchema = z.object({
-  tenantId: z.string().min(1).regex(/^[a-z0-9-]+$/, "tenantId must be lowercase kebab-case"),
-  displayName: z.string().min(1),
-  repos: z.array(RepoSchema).min(1),
-  issueConfig: IssueConfigSchema.optional(),
-  ai: AiSchema,
-  systemPrompt: z.string().min(1),
-  allowedOrigins: z.array(z.string()).default([]),
-  allowedUsers: z.array(z.string()).default([]),
-  rateLimits: RateLimitsSchema,
-});
+const REPO_FULL_NAME_PATTERN = /^[^/]+\/[^/]+$/;
+
+export const TenantConfigSchema = z
+  .object({
+    tenantId: z.string().min(1).regex(/^[a-z0-9-]+$/, "tenantId must be lowercase kebab-case"),
+    displayName: z.string().min(1),
+    repos: z.array(RepoSchema).min(1),
+    issueConfig: IssueConfigSchema.optional(),
+    ai: AiSchema,
+    systemPrompt: z.string().min(1),
+    allowedOrigins: z.array(z.string()).default([]),
+    allowedUsers: z.array(z.string()).default([]),
+    /**
+     * Optional whitelist of "owner/name" identifiers the assistant may
+     * reason about by default. Every entry MUST (1) match the owner/name
+     * regex and (2) reference a repo already declared in `repos`. The
+     * scoping gate in Day 5 uses this list when the request does not
+     * specify an explicit repoScope.
+     */
+    defaultRepoScope: z.array(z.string().regex(REPO_FULL_NAME_PATTERN)).optional(),
+    rateLimits: RateLimitsSchema,
+  })
+  .superRefine((tenant, ctx) => {
+    if (!tenant.defaultRepoScope) return;
+    const declared = new Set(tenant.repos.map((r) => `${r.owner}/${r.name}`));
+    for (let i = 0; i < tenant.defaultRepoScope.length; i += 1) {
+      const entry = tenant.defaultRepoScope[i] as string;
+      if (!declared.has(entry)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["defaultRepoScope", i],
+          message: `defaultRepoScope entry "${entry}" does not reference a repo declared in tenant.repos`,
+        });
+      }
+    }
+  });
 
 export type Tenant = z.infer<typeof TenantConfigSchema>;
 export type AiProvider = z.infer<typeof AiProviderSchema>;
