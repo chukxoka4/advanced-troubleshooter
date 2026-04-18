@@ -179,4 +179,29 @@ describe("claudeProvider", () => {
       provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" }),
     ).rejects.toThrow(/claude api 500/);
   });
+
+  it("sanitises upstream error bodies (truncates + redacts echoed credentials)", async () => {
+    const huge = "y".repeat(2000);
+    const body = `x-api-key: sk-ant-real-xyz authorization: "Bearer sk-ant-other" ${huge}`;
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 500 }));
+    const provider = createClaudeProvider({
+      apiKey: "sk-ant-live",
+      model: "claude-sonnet-4-6",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    let err: Error | undefined;
+    try {
+      await provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" });
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    const msg = err?.message ?? "";
+    expect(msg).not.toContain("sk-ant-real-xyz");
+    expect(msg).not.toContain("sk-ant-other");
+    expect(msg).toContain("[redacted]");
+    expect(msg).toContain("[truncated]");
+    expect(msg.length).toBeLessThan(700);
+  });
 });

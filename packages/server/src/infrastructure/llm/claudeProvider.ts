@@ -87,7 +87,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions): LlmProvide
 
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`claude api ${response.status}: ${text}`);
+        throw new Error(`claude api ${response.status}: ${sanitiseUpstreamError(text)}`);
       }
 
       const data = (await response.json()) as ClaudeMessagesResponse;
@@ -184,7 +184,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions): LlmProvide
       });
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`claude api ${response.status}: ${text}`);
+        throw new Error(`claude api ${response.status}: ${sanitiseUpstreamError(text)}`);
       }
       const data = (await response.json()) as {
         content?: Array<{
@@ -247,4 +247,18 @@ export function createClaudeProvider(options: ClaudeProviderOptions): LlmProvide
 
 function toClaudeMessage(m: Message): { role: "user" | "assistant"; content: string } {
   return { role: m.role, content: m.content };
+}
+
+/**
+ * Truncate upstream error bodies and strip echoed auth headers before
+ * embedding them in thrown Error messages / logs.
+ */
+function sanitiseUpstreamError(body: string): string {
+  const MAX = 500;
+  const truncated = body.length > MAX ? `${body.slice(0, MAX)}…[truncated]` : body;
+  return truncated
+    .replace(/Bearer\s+[A-Za-z0-9._\-]+/g, "Bearer [redacted]")
+    .replace(/(["']?authorization["']?\s*[:=]\s*["']?)[^"'\s,}]+(\s+[A-Za-z0-9._\-]+)?/gi, "$1[redacted]")
+    .replace(/(["']?x-api-key["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, "$1[redacted]")
+    .replace(/(["']?api[-_]?key["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, "$1[redacted]");
 }

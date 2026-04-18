@@ -425,6 +425,81 @@ describe("agentLoop.service", () => {
     expect(result.answer).toContain("tool-call cap reached");
   });
 
+  it("maxCostUsd: bails with PARTIAL_MARKER once totalCost crosses the ceiling", async () => {
+    const tool: ToolDefinition = {
+      name: "mock",
+      description: "",
+      jsonSchema: {},
+      execute: async () => "ok",
+    };
+    // Turn 1 costs $0.30 (under ceiling of $0.50, no bail), pushes tool call.
+    // Turn 2 costs $0.40 — totalCost now $0.70 > $0.50 → bail.
+    // If the loop did NOT bail, turn 3 would fire and the provider script
+    // would throw "unexpected extra LLM turn".
+    const { provider, sendMessageWithTools } = providerScript([
+      {
+        content: "",
+        toolCalls: [tc("c1", "mock", { repo: "acme/a" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        estimatedCostUsd: 0.3,
+      },
+      {
+        content: "",
+        toolCalls: [tc("c2", "mock", { repo: "acme/a" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        estimatedCostUsd: 0.4,
+      },
+    ]);
+    const result = await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [tool],
+      maxCostUsd: 0.5,
+    });
+    expect(sendMessageWithTools).toHaveBeenCalledTimes(2);
+    expect(result.cost).toBeCloseTo(0.7, 5);
+    expect(result.answer).toContain("tool-call cap reached");
+  });
+
+  it("maxCostUsd undefined: no ceiling, runs to natural end_turn", async () => {
+    const tool: ToolDefinition = {
+      name: "mock",
+      description: "",
+      jsonSchema: {},
+      execute: async () => "ok",
+    };
+    const { provider } = providerScript([
+      {
+        content: "",
+        toolCalls: [tc("c1", "mock", { repo: "acme/a" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 999,
+      },
+      {
+        content: "done",
+        toolCalls: [],
+        stopReason: "end_turn",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 999,
+      },
+    ]);
+    const result = await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [tool],
+    });
+    expect(result.answer).toBe("done");
+  });
+
   it("preserves full multi-turn tool-call history across provider invocations", async () => {
     // 3 turns: tool → tool → final answer. After turn 2 the provider must
     // be called with BOTH earlier (tool_calls → tool_results) pairs, not

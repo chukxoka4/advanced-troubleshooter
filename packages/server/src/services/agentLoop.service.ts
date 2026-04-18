@@ -44,6 +44,15 @@ export interface AgentLoopRunInput {
   tools: ToolDefinition[];
   maxTurns?: number;
   maxToolCalls?: number;
+  /**
+   * Optional per-request cost ceiling in USD. When set, the loop bails
+   * with PARTIAL_MARKER after any turn where the running totalCost
+   * exceeds this value. Defaults to undefined (no ceiling).
+   *
+   * This is a belt-and-braces stop against a runaway conversation
+   * wedging large token counts past the provider-daily-cap safety net.
+   */
+  maxCostUsd?: number;
 }
 
 export interface AgentLoopToolCallRecord {
@@ -154,6 +163,15 @@ export function createAgentLoop(deps: AgentLoopDeps): {
 
         if (response.toolCalls.length === 0 || response.stopReason !== "tool_use") {
           finalAnswer = response.content;
+          break;
+        }
+
+        // Per-request cost ceiling. Checked after the turn's cost is added
+        // so we bail on the first turn that pushes totalCost over the
+        // threshold, regardless of whether that turn also requested tools.
+        if (input.maxCostUsd !== undefined && totalCost > input.maxCostUsd) {
+          finalAnswer = response.content || PARTIAL_MARKER;
+          capReached = true;
           break;
         }
 

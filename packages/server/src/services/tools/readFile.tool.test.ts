@@ -113,4 +113,24 @@ describe("readFileTool", () => {
     ];
     expect(call[2]).toBe(1);
   });
+
+  it("rejects NaN / Infinity for startLine and endLine", async () => {
+    const readFileRange = vi.fn();
+    const ctx = makeCtx({
+      githubClient: { readFileRange } as unknown as GithubMcpClient,
+    });
+    await expect(
+      readFileTool.execute(
+        { repo: "acme/widgets", path: "x.ts", startLine: Number.NaN },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      readFileTool.execute(
+        { repo: "acme/widgets", path: "x.ts", endLine: Number.POSITIVE_INFINITY },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(readFileRange).not.toHaveBeenCalled();
+  });
 });

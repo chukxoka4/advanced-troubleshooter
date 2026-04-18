@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createSpendTracker, type SpendTracker } from "./spendTracker.js";
 import type {
   LlmProvider,
@@ -87,7 +88,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
 
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`gemini api ${response.status}: ${text}`);
+        throw new Error(`gemini api ${response.status}: ${sanitiseUpstreamError(text)}`);
       }
 
       const data = (await response.json()) as GeminiResponse;
@@ -182,7 +183,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
       });
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`gemini api ${response.status}: ${text}`);
+        throw new Error(`gemini api ${response.status}: ${sanitiseUpstreamError(text)}`);
       }
       const data = (await response.json()) as {
         candidates?: Array<{
@@ -200,17 +201,17 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
       const candidate = data.candidates?.[0];
       const parts = candidate?.content?.parts ?? [];
       const content = parts.map((p) => p.text ?? "").join("");
-      let callIdx = 0;
+      // Use a UUID suffix so IDs are unique across requests. The previous
+      // `gem_${n}` scheme collided whenever two responses emitted tool
+      // calls at the same index, which broke matching when multiple
+      // conversations shared log sinks or when the loop replayed turns.
       const toolCalls = parts
         .filter((p) => p.functionCall && typeof p.functionCall.name === "string")
-        .map((p) => {
-          callIdx += 1;
-          return {
-            id: `gem_${callIdx}`,
-            name: p.functionCall?.name as string,
-            arguments: (p.functionCall?.args ?? {}) as Record<string, unknown>,
-          };
-        });
+        .map((p) => ({
+          id: `gem_${randomUUID()}`,
+          name: p.functionCall?.name as string,
+          arguments: (p.functionCall?.args ?? {}) as Record<string, unknown>,
+        }));
 
       const stopReason: ToolCallingResult["stopReason"] =
         toolCalls.length > 0
@@ -251,4 +252,18 @@ function toGeminiContent(m: Message): { role: "user" | "model"; parts: [{ text: 
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   };
+}
+
+/**
+ * Truncate upstream error bodies and strip echoed auth headers before
+ * embedding them in thrown Error messages / logs.
+ */
+function sanitiseUpstreamError(body: string): string {
+  const MAX = 500;
+  const truncated = body.length > MAX ? `${body.slice(0, MAX)}…[truncated]` : body;
+  return truncated
+    .replace(/Bearer\s+[A-Za-z0-9._\-]+/g, "Bearer [redacted]")
+    .replace(/(["']?authorization["']?\s*[:=]\s*["']?)[^"'\s,}]+(\s+[A-Za-z0-9._\-]+)?/gi, "$1[redacted]")
+    .replace(/(["']?x-goog-api-key["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, "$1[redacted]")
+    .replace(/(["']?api[-_]?key["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, "$1[redacted]");
 }

@@ -155,4 +155,30 @@ describe("openaiProvider", () => {
       provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" }),
     ).rejects.toThrow(/openai api 429/);
   });
+
+  it("sanitises upstream error bodies (truncates + redacts echoed credentials)", async () => {
+    const huge = "x".repeat(2000);
+    const body = `Authorization: Bearer sk-real-secret-123 api_key: "sk-another" ${huge}`;
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 400 }));
+    const provider = createOpenAiProvider({
+      apiKey: "sk-live",
+      model: "gpt-4o",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    let err: Error | undefined;
+    try {
+      await provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" });
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    const msg = err?.message ?? "";
+    expect(msg).not.toContain("sk-real-secret-123");
+    expect(msg).not.toContain("sk-another");
+    expect(msg).toContain("[redacted]");
+    expect(msg).toContain("[truncated]");
+    // Whole message stays bounded.
+    expect(msg.length).toBeLessThan(700);
+  });
 });

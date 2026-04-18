@@ -84,7 +84,7 @@ export function createOpenAiProvider(options: OpenAiProviderOptions): LlmProvide
 
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`openai api ${response.status}: ${text}`);
+        throw new Error(`openai api ${response.status}: ${sanitiseUpstreamError(text)}`);
       }
 
       const data = (await response.json()) as OpenAiChatResponse;
@@ -176,7 +176,7 @@ export function createOpenAiProvider(options: OpenAiProviderOptions): LlmProvide
       });
       if (!response.ok) {
         const text = await response.text();
-        throw new Error(`openai api ${response.status}: ${text}`);
+        throw new Error(`openai api ${response.status}: ${sanitiseUpstreamError(text)}`);
       }
       const data = (await response.json()) as {
         choices?: Array<{
@@ -248,4 +248,23 @@ export function createOpenAiProvider(options: OpenAiProviderOptions): LlmProvide
 
 function toOpenAiMessage(m: Message): { role: "user" | "assistant"; content: string } {
   return { role: m.role, content: m.content };
+}
+
+/**
+ * Truncate upstream error bodies and strip anything that looks like an
+ * echoed credential header before embedding in a thrown Error message.
+ * Upstream APIs sometimes echo request headers back in 4xx/5xx bodies; we
+ * must never let that land in logs or propagate to the client.
+ */
+function sanitiseUpstreamError(body: string): string {
+  const MAX = 500;
+  // Truncate first so the final message length is always bounded regardless
+  // of what regex matches land.
+  const truncated = body.length > MAX ? `${body.slice(0, MAX)}…[truncated]` : body;
+  // Header-value match excludes quotes AND whitespace so a match on one
+  // header doesn't greedily eat subsequent headers on the same line.
+  return truncated
+    .replace(/Bearer\s+[A-Za-z0-9._\-]+/g, "Bearer [redacted]")
+    .replace(/(["']?authorization["']?\s*[:=]\s*["']?)[^"'\s,}]+(\s+[A-Za-z0-9._\-]+)?/gi, "$1[redacted]")
+    .replace(/(["']?api[-_]?key["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, "$1[redacted]");
 }

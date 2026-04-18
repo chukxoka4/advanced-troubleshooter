@@ -55,6 +55,17 @@ export const readFileTool: ToolDefinition<ReadFileArgs> = {
       throw new ValidationError("readFile: path is required");
     }
 
+    // Reject NaN / ±Infinity up front. `typeof NaN === "number"`, so the
+    // previous `typeof === "number"` check alone would let NaN through and
+    // Math.floor(NaN) would silently become NaN and propagate as a bogus
+    // range to the github client.
+    if (args.startLine !== undefined && !Number.isFinite(args.startLine)) {
+      throw new ValidationError("readFile: startLine must be a finite number");
+    }
+    if (args.endLine !== undefined && !Number.isFinite(args.endLine)) {
+      throw new ValidationError("readFile: endLine must be a finite number");
+    }
+
     const startRaw = typeof args.startLine === "number" ? args.startLine : 1;
     const endRaw =
       typeof args.endLine === "number" ? args.endLine : startRaw + MAX_RANGE_LINES - 1;

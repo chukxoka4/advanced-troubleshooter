@@ -142,4 +142,72 @@ describe("geminiProvider", () => {
       provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" }),
     ).rejects.toThrow(/gemini api 400/);
   });
+
+  it("sanitises upstream error bodies (truncates + redacts echoed credentials)", async () => {
+    const huge = "z".repeat(2000);
+    const body = `x-goog-api-key: AIza-real-secret api_key: "AIza-another" ${huge}`;
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 400 }));
+    const provider = createGeminiProvider({
+      apiKey: "AIza-live",
+      model: "gemini-2.5-pro",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    let err: Error | undefined;
+    try {
+      await provider.sendMessage({ systemPrompt: "s", history: [], userMessage: "hi" });
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    const msg = err?.message ?? "";
+    expect(msg).not.toContain("AIza-real-secret");
+    expect(msg).not.toContain("AIza-another");
+    expect(msg).toContain("[redacted]");
+    expect(msg).toContain("[truncated]");
+    expect(msg.length).toBeLessThan(700);
+  });
+
+  it("emits unique tool-call IDs across separate requests (no gem_1 collisions)", async () => {
+    const resp = () =>
+      new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { functionCall: { name: "mock", args: {} } },
+                  { functionCall: { name: "mock", args: {} } },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const fetchImpl = vi.fn(async () => resp());
+    const provider = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini-2.5-pro",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const r1 = await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [{ name: "mock", description: "", jsonSchema: {} }],
+    });
+    const r2 = await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [{ name: "mock", description: "", jsonSchema: {} }],
+    });
+    const ids = [...r1.toolCalls.map((c) => c.id), ...r2.toolCalls.map((c) => c.id)];
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id.startsWith("gem_")).toBe(true);
+  });
 });
