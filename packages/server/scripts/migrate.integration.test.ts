@@ -51,6 +51,7 @@ describe("runMigrations (integration)", () => {
   it("applies every migration on a fresh database and creates the expected tables", async () => {
     const result = await runMigrations({ databaseUrl: testDbUrl });
     expect(result.applied).toContain("001_init.sql");
+    expect(result.applied).toContain("002_repo_maps.sql");
     expect(result.skipped).toHaveLength(0);
 
     const client = new Client({ connectionString: testDbUrl });
@@ -65,15 +66,32 @@ describe("runMigrations (integration)", () => {
         "analytics_events",
         "api_keys",
         "schema_migrations",
+        "repo_maps",
+      ]));
+
+      const columns = await client.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'repo_maps'",
+      );
+      const columnNames = columns.rows.map((r) => r.column_name);
+      expect(columnNames).toEqual(expect.arrayContaining([
+        "id",
+        "tenant_id",
+        "repo_full_name",
+        "default_branch",
+        "head_sha",
+        "content",
+        "symbol_count",
+        "built_at",
       ]));
     } finally {
       await client.end();
     }
   }, 30_000);
 
-  it("is idempotent: a second run applies nothing and skips the migration", async () => {
+  it("is idempotent: a second run applies nothing and skips all migrations", async () => {
     const second = await runMigrations({ databaseUrl: testDbUrl });
     expect(second.applied).toHaveLength(0);
     expect(second.skipped).toContain("001_init.sql");
+    expect(second.skipped).toContain("002_repo_maps.sql");
   }, 30_000);
 });
