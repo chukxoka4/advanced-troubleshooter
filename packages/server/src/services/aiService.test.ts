@@ -89,6 +89,13 @@ function makeDeps() {
         estimatedCostUsd: 0.01,
       };
     }),
+    sendMessageWithTools: vi.fn(async () => ({
+      content: "answer",
+      toolCalls: [],
+      stopReason: "end_turn" as const,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      estimatedCostUsd: 0,
+    })),
     getUsage: () => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 }),
     getSpendToday: () => 0,
   };

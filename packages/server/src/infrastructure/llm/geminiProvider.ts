@@ -4,6 +4,8 @@ import type {
   Message,
   SendMessageOptions,
   SendMessageResult,
+  SendMessageWithToolsOptions,
+  ToolCallingResult,
   TokenUsage,
 } from "./types.js";
 
@@ -112,6 +114,10 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
       tracker.record(cost);
 
       return { content, usage, estimatedCostUsd: cost };
+    },
+
+    async sendMessageWithTools(_opts: SendMessageWithToolsOptions): Promise<ToolCallingResult> {
+      throw new Error("geminiProvider.sendMessageWithTools: not implemented");
     },
 
     getUsage: () => ({ ...totals }),

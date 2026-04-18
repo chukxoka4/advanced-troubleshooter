@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { SpendCapExceededError, type LlmProvider, type Message } from "./types.js";
+import {
+  SpendCapExceededError,
+  type LlmProvider,
+  type Message,
+  type ToolCall,
+  type ToolResult,
+  type ToolSpec,
+} from "./types.js";
 
 describe("llm types", () => {
   it("SpendCapExceededError exposes the provider name and cap", () => {
@@ -23,6 +30,15 @@ describe("llm types", () => {
           estimatedCostUsd: 0.001,
         };
       },
+      async sendMessageWithTools() {
+        return {
+          content: "",
+          toolCalls: [],
+          stopReason: "end_turn",
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          estimatedCostUsd: 0,
+        };
+      },
       getUsage: () => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 }),
       getSpendToday: () => 0,
     };
@@ -33,5 +49,18 @@ describe("llm types", () => {
     });
     expect(result.content).toBe("echo:hi");
     expect(result.usage.totalTokens).toBe(2);
+  });
+
+  it("ToolSpec / ToolCall / ToolResult have the expected shape", () => {
+    const spec: ToolSpec = {
+      name: "readFile",
+      description: "read",
+      jsonSchema: { type: "object", properties: {} },
+    };
+    const call: ToolCall = { id: "t1", name: "readFile", arguments: { path: "a" } };
+    const result: ToolResult = { toolCallId: "t1", name: "readFile", content: "ok" };
+    expect(spec.name).toBe("readFile");
+    expect(call.arguments).toEqual({ path: "a" });
+    expect(result.isError).toBeUndefined();
   });
 });

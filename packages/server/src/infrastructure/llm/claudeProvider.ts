@@ -4,6 +4,8 @@ import type {
   Message,
   SendMessageOptions,
   SendMessageResult,
+  SendMessageWithToolsOptions,
+  ToolCallingResult,
   TokenUsage,
 } from "./types.js";
 
@@ -113,6 +115,10 @@ export function createClaudeProvider(options: ClaudeProviderOptions): LlmProvide
       tracker.record(cost);
 
       return { content, usage, estimatedCostUsd: cost };
+    },
+
+    async sendMessageWithTools(_opts: SendMessageWithToolsOptions): Promise<ToolCallingResult> {
+      throw new Error("claudeProvider.sendMessageWithTools: not implemented");
     },
 
     getUsage: () => ({ ...totals }),
