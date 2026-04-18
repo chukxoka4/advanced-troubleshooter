@@ -69,6 +69,9 @@ describe("readFileTool", () => {
     expect(out).toContain("path: acme/widgets:x.ts");
     expect(out).toContain("lines: 1-3");
     expect(out).toContain("a\nb\nc");
+    // untrusted-data envelope prevents prompt injection via file content
+    expect(out).toContain("<untrusted_file_content>");
+    expect(out).toContain("</untrusted_file_content>");
   });
 
   it("returns the binary marker for NUL-containing content", async () => {

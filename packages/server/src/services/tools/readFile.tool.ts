@@ -78,11 +78,16 @@ export const readFileTool: ToolDefinition<ReadFileArgs> = {
       return BINARY_MARKER;
     }
 
+    // Wrap retrieved file content in an untrusted-data envelope so the model
+    // treats everything between the tags as DATA, not INSTRUCTIONS. A source
+    // file containing prompt-injection text ("ignore previous instructions…")
+    // must not be able to steer the agent.
     return [
       `path: ${range.repo}:${range.path}`,
       `lines: ${range.startLine}-${range.endLine}`,
-      "---",
+      "<untrusted_file_content>",
       range.content,
+      "</untrusted_file_content>",
     ].join("\n");
   },
 };
