@@ -69,9 +69,10 @@ describe("readFileTool", () => {
     expect(out).toContain("path: acme/widgets:x.ts");
     expect(out).toContain("lines: 1-3");
     expect(out).toContain("a\nb\nc");
-    // untrusted-data envelope prevents prompt injection via file content
-    expect(out).toContain("<untrusted_file_content>");
-    expect(out).toContain("</untrusted_file_content>");
+    // Untrusted-data envelope is applied at the agent-loop layer (not here);
+    // the tool returns raw content.
+    expect(out).not.toContain("<untrusted_file_content>");
+    expect(out).not.toContain("<untrusted_tool_output>");
   });
 
   it("returns the binary marker for NUL-containing content", async () => {

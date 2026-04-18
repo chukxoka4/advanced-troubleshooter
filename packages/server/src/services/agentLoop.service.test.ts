@@ -219,6 +219,84 @@ describe("agentLoop.service", () => {
     ).rejects.toThrow(/boom/);
   });
 
+  it("wraps every successful tool output in <untrusted_tool_output> before handing back to provider", async () => {
+    const tools: ToolDefinition[] = [
+      { name: "readFile", description: "", jsonSchema: {}, execute: async () => "file body" },
+      { name: "searchCode", description: "", jsonSchema: {}, execute: async () => "- acme/a: x.ts" },
+      { name: "findSymbol", description: "", jsonSchema: {}, execute: async () => "- acme/a:x.ts L1-2 foo" },
+    ];
+    const { provider, sendMessageWithTools } = providerScript([
+      {
+        content: "",
+        toolCalls: [
+          tc("r1", "readFile", { repo: "acme/a", path: "x.ts" }),
+          tc("s1", "searchCode", { query: "foo", repo: "acme/a" }),
+          tc("f1", "findSymbol", { symbol: "foo", repo: "acme/a" }),
+        ],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+      {
+        content: "done",
+        toolCalls: [],
+        stopReason: "end_turn",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+    ]);
+    await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools,
+    });
+    const second = sendMessageWithTools.mock.calls[1]?.[0] as SendMessageWithToolsOptions;
+    expect(second.toolResults).toHaveLength(3);
+    for (const r of second.toolResults ?? []) {
+      expect(r.isError).not.toBe(true);
+      expect(r.content).toMatch(/^<untrusted_tool_output>\n[\s\S]*\n<\/untrusted_tool_output>$/);
+    }
+  });
+
+  it("does NOT wrap error tool results (so the model reads the error cleanly)", async () => {
+    const tool: ToolDefinition = {
+      name: "readFile",
+      description: "",
+      jsonSchema: {},
+      execute: async () => "should not run",
+    };
+    const { provider, sendMessageWithTools } = providerScript([
+      {
+        content: "",
+        toolCalls: [tc("c1", "readFile", { repo: "attacker/x", path: "a.ts" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+      {
+        content: "final",
+        toolCalls: [],
+        stopReason: "end_turn",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+    ]);
+    await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [tool],
+    });
+    const second = sendMessageWithTools.mock.calls[1]?.[0] as SendMessageWithToolsOptions;
+    expect(second.toolResults?.[0]?.isError).toBe(true);
+    expect(second.toolResults?.[0]?.content).not.toContain("<untrusted_tool_output>");
+  });
+
   it("exceeding maxToolCalls forces a final answer with partial marker", async () => {
     const tool: ToolDefinition = {
       name: "mock",

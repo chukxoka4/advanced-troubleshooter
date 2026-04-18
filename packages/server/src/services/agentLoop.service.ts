@@ -73,6 +73,20 @@ const DEFAULT_MAX_TOOL_CALLS = 16;
 const PARTIAL_MARKER =
   "[agent-loop: tool-call cap reached — respond with the best answer from the results so far]";
 
+/**
+ * Wrap a successful tool result in an untrusted-data envelope so the model
+ * treats everything between the tags as DATA, not INSTRUCTIONS. Tool outputs
+ * may contain source-code text or user-controlled content with
+ * prompt-injection payloads ("ignore previous instructions…"); the envelope
+ * is the structural guard.
+ *
+ * Applied uniformly to every successful tool output; error results are left
+ * unwrapped so the model can read the error cleanly.
+ */
+function wrapUntrusted(content: string): string {
+  return `<untrusted_tool_output>\n${content}\n</untrusted_tool_output>`;
+}
+
 function isAllowedRepoArg(
   args: Record<string, unknown>,
   allowedRepos: ReadonlyArray<TenantRepo>,
@@ -203,7 +217,7 @@ export function createAgentLoop(deps: AgentLoopDeps): {
             nextResults.push({
               toolCallId: call.id,
               name: call.name,
-              content: result,
+              content: wrapUntrusted(result),
             });
           } catch (err) {
             if (err instanceof ValidationError) {
