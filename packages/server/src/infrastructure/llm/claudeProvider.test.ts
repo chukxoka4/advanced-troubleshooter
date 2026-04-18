@@ -90,6 +90,81 @@ describe("claudeProvider", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("sendMessageWithTools forwards tools and decodes tool_use blocks", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        content: [
+          { type: "text", text: "thinking" },
+          { type: "tool_use", id: "tu_1", name: "readFile", input: { path: "a.ts" } },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 5, output_tokens: 5 },
+      }),
+    );
+    const provider = createClaudeProvider({
+      apiKey: "sk",
+      model: "claude-sonnet-4-6",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const result = await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [
+        {
+          name: "readFile",
+          description: "read",
+          jsonSchema: { type: "object", properties: { path: { type: "string" } } },
+        },
+      ],
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.tools[0]).toEqual({
+      name: "readFile",
+      description: "read",
+      input_schema: { type: "object", properties: { path: { type: "string" } } },
+    });
+    expect(body.system).toBe("s");
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.toolCalls).toEqual([
+      { id: "tu_1", name: "readFile", arguments: { path: "a.ts" } },
+    ]);
+    expect(result.content).toBe("thinking");
+  });
+
+  it("sendMessageWithTools enforces spend cap", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      }),
+    );
+    const provider = createClaudeProvider({
+      apiKey: "sk",
+      model: "m",
+      dailySpendCapUsd: 5,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [],
+    });
+    await expect(
+      provider.sendMessageWithTools({
+        systemPrompt: "s",
+        history: [],
+        userMessage: "u",
+        tools: [],
+      }),
+    ).rejects.toBeInstanceOf(SpendCapExceededError);
+  });
+
   it("throws on non-2xx responses", async () => {
     const fetchImpl = vi.fn(
       async () => new Response("boom", { status: 500, statusText: "ISE" }),
