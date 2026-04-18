@@ -123,27 +123,42 @@ export function createClaudeProvider(options: ClaudeProviderOptions): LlmProvide
         ...opts.history.map(toClaudeMessage),
         { role: "user", content: opts.userMessage },
       ];
-      if (opts.priorToolCalls && opts.priorToolCalls.length > 0) {
-        messages.push({
-          role: "assistant",
-          content: opts.priorToolCalls.map((c) => ({
-            type: "tool_use",
-            id: c.id,
-            name: c.name,
-            input: c.arguments,
-          })),
-        });
+      // Replay every prior (tool_use → tool_result) pair in order, so the
+      // Claude transcript stays coherent across multi-turn tool conversations.
+      const turns: Array<{ toolCalls: typeof opts.priorToolCalls; toolResults: typeof opts.toolResults }> = [];
+      if (opts.priorToolTurns && opts.priorToolTurns.length > 0) {
+        for (const t of opts.priorToolTurns) {
+          turns.push({ toolCalls: t.toolCalls, toolResults: t.toolResults });
+        }
+      } else if (
+        (opts.priorToolCalls && opts.priorToolCalls.length > 0) ||
+        (opts.toolResults && opts.toolResults.length > 0)
+      ) {
+        turns.push({ toolCalls: opts.priorToolCalls, toolResults: opts.toolResults });
       }
-      if (opts.toolResults && opts.toolResults.length > 0) {
-        messages.push({
-          role: "user",
-          content: opts.toolResults.map((r) => ({
-            type: "tool_result",
-            tool_use_id: r.toolCallId,
-            content: r.content,
-            ...(r.isError ? { is_error: true } : {}),
-          })),
-        });
+      for (const t of turns) {
+        if (t.toolCalls && t.toolCalls.length > 0) {
+          messages.push({
+            role: "assistant",
+            content: t.toolCalls.map((c) => ({
+              type: "tool_use",
+              id: c.id,
+              name: c.name,
+              input: c.arguments,
+            })),
+          });
+        }
+        if (t.toolResults && t.toolResults.length > 0) {
+          messages.push({
+            role: "user",
+            content: t.toolResults.map((r) => ({
+              type: "tool_result",
+              tool_use_id: r.toolCallId,
+              content: r.content,
+              ...(r.isError ? { is_error: true } : {}),
+            })),
+          });
+        }
       }
 
       const body = {

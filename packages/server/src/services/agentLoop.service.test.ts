@@ -49,7 +49,16 @@ function providerScript(responses: ToolCallingResult[]): {
   provider: LlmProvider;
   sendMessageWithTools: ReturnType<typeof vi.fn>;
 } {
-  const sendMessageWithTools = vi.fn(async (_opts: SendMessageWithToolsOptions) => {
+  // Deep-clone the opts on capture so downstream assertions see a snapshot
+  // of what the loop passed on THIS turn, not the final state of any
+  // mutable arrays (e.g. priorToolTurns) that the loop grows across turns.
+  const sendMessageWithTools = vi.fn(async (opts: SendMessageWithToolsOptions) => {
+    // vi records the argument by reference; replace it with a deep clone
+    // so later mutations inside the loop (e.g. growing priorToolTurns)
+    // don't bleed into earlier captured calls.
+    const clone = JSON.parse(JSON.stringify(opts)) as SendMessageWithToolsOptions;
+    const calls = sendMessageWithTools.mock.calls;
+    calls[calls.length - 1] = [clone] as unknown as typeof calls[number];
     const next = responses.shift();
     if (!next) throw new Error("unexpected extra LLM turn");
     return next;
@@ -154,8 +163,9 @@ describe("agentLoop.service", () => {
     expect(result.toolCalls[0]?.errorMessage).toBe("repo not in tenant scope");
     // And the tool-result the provider saw was the scope error:
     const secondCall = sendMessageWithTools.mock.calls[1]?.[0] as SendMessageWithToolsOptions;
-    expect(secondCall.toolResults?.[0]?.isError).toBe(true);
-    expect(secondCall.toolResults?.[0]?.content).toContain("repo not in tenant scope");
+    const results = secondCall.priorToolTurns?.[0]?.toolResults;
+    expect(results?.[0]?.isError).toBe(true);
+    expect(results?.[0]?.content).toContain("repo not in tenant scope");
   });
 
   it("collects filesReferenced from successful readFile calls (deduped)", async () => {
@@ -254,8 +264,9 @@ describe("agentLoop.service", () => {
       tools,
     });
     const second = sendMessageWithTools.mock.calls[1]?.[0] as SendMessageWithToolsOptions;
-    expect(second.toolResults).toHaveLength(3);
-    for (const r of second.toolResults ?? []) {
+    const results = second.priorToolTurns?.[0]?.toolResults ?? [];
+    expect(results).toHaveLength(3);
+    for (const r of results) {
       expect(r.isError).not.toBe(true);
       expect(r.content).toMatch(/^<untrusted_tool_output>\n[\s\S]*\n<\/untrusted_tool_output>$/);
     }
@@ -293,8 +304,9 @@ describe("agentLoop.service", () => {
       tools: [tool],
     });
     const second = sendMessageWithTools.mock.calls[1]?.[0] as SendMessageWithToolsOptions;
-    expect(second.toolResults?.[0]?.isError).toBe(true);
-    expect(second.toolResults?.[0]?.content).not.toContain("<untrusted_tool_output>");
+    const result0 = second.priorToolTurns?.[0]?.toolResults?.[0];
+    expect(result0?.isError).toBe(true);
+    expect(result0?.content).not.toContain("<untrusted_tool_output>");
   });
 
   it("maxToolCalls=2 allows exactly 2 invocations before forcing exit", async () => {
@@ -411,5 +423,70 @@ describe("agentLoop.service", () => {
       maxToolCalls: 1,
     });
     expect(result.answer).toContain("tool-call cap reached");
+  });
+
+  it("preserves full multi-turn tool-call history across provider invocations", async () => {
+    // 3 turns: tool → tool → final answer. After turn 2 the provider must
+    // be called with BOTH earlier (tool_calls → tool_results) pairs, not
+    // just the latest one — OpenAI's contract requires each tool message
+    // to follow its matching assistant.tool_calls.
+    const tool: ToolDefinition = {
+      name: "mock",
+      description: "",
+      jsonSchema: {},
+      execute: async () => "ok",
+    };
+    const { provider, sendMessageWithTools } = providerScript([
+      {
+        content: "",
+        toolCalls: [tc("c1", "mock", { repo: "acme/a" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+      {
+        content: "",
+        toolCalls: [tc("c2", "mock", { repo: "acme/a" })],
+        stopReason: "tool_use",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+      {
+        content: "done",
+        toolCalls: [],
+        stopReason: "end_turn",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        estimatedCostUsd: 0,
+      },
+    ]);
+    const result = await makeLoop(provider).run({
+      tenant: makeTenant(),
+      allowedRepos: [makeRepo()],
+      history: [],
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [tool],
+    });
+    expect(result.answer).toBe("done");
+    expect(sendMessageWithTools).toHaveBeenCalledTimes(3);
+
+    // Turn 1: no prior turns.
+    const call1 = sendMessageWithTools.mock.calls[0][0] as SendMessageWithToolsOptions;
+    expect(call1.priorToolTurns).toBeUndefined();
+
+    // Turn 2: exactly one prior turn (c1 pair).
+    const call2 = sendMessageWithTools.mock.calls[1][0] as SendMessageWithToolsOptions;
+    expect(call2.priorToolTurns).toHaveLength(1);
+    expect(call2.priorToolTurns?.[0]?.toolCalls[0]?.id).toBe("c1");
+
+    // Turn 3: BOTH prior turns replayed, in order. If only the latest was
+    // preserved this would be length 1 and the c1 pair would be lost.
+    const call3 = sendMessageWithTools.mock.calls[2][0] as SendMessageWithToolsOptions;
+    expect(call3.priorToolTurns).toHaveLength(2);
+    expect(call3.priorToolTurns?.[0]?.toolCalls[0]?.id).toBe("c1");
+    expect(call3.priorToolTurns?.[1]?.toolCalls[0]?.id).toBe("c2");
+    // Each tool_calls entry is paired with its matching results.
+    expect(call3.priorToolTurns?.[0]?.toolResults[0]?.toolCallId).toBe("c1");
+    expect(call3.priorToolTurns?.[1]?.toolResults[0]?.toolCallId).toBe("c2");
   });
 });

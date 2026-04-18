@@ -122,24 +122,38 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
         ...opts.history.map(toGeminiContent),
         { role: "user", parts: [{ text: opts.userMessage }] },
       ];
-      if (opts.priorToolCalls && opts.priorToolCalls.length > 0) {
-        contents.push({
-          role: "model",
-          parts: opts.priorToolCalls.map((c) => ({
-            functionCall: { name: c.name, args: c.arguments },
-          })),
-        });
+      // Replay every prior (functionCall → functionResponse) pair in order.
+      const turns: Array<{ toolCalls: typeof opts.priorToolCalls; toolResults: typeof opts.toolResults }> = [];
+      if (opts.priorToolTurns && opts.priorToolTurns.length > 0) {
+        for (const t of opts.priorToolTurns) {
+          turns.push({ toolCalls: t.toolCalls, toolResults: t.toolResults });
+        }
+      } else if (
+        (opts.priorToolCalls && opts.priorToolCalls.length > 0) ||
+        (opts.toolResults && opts.toolResults.length > 0)
+      ) {
+        turns.push({ toolCalls: opts.priorToolCalls, toolResults: opts.toolResults });
       }
-      if (opts.toolResults && opts.toolResults.length > 0) {
-        contents.push({
-          role: "user",
-          parts: opts.toolResults.map((r) => ({
-            functionResponse: {
-              name: r.name,
-              response: r.isError ? { error: r.content } : { content: r.content },
-            },
-          })),
-        });
+      for (const t of turns) {
+        if (t.toolCalls && t.toolCalls.length > 0) {
+          contents.push({
+            role: "model",
+            parts: t.toolCalls.map((c) => ({
+              functionCall: { name: c.name, args: c.arguments },
+            })),
+          });
+        }
+        if (t.toolResults && t.toolResults.length > 0) {
+          contents.push({
+            role: "user",
+            parts: t.toolResults.map((r) => ({
+              functionResponse: {
+                name: r.name,
+                response: r.isError ? { error: r.content } : { content: r.content },
+              },
+            })),
+          });
+        }
       }
 
       const body = {

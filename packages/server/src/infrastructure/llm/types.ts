@@ -62,20 +62,36 @@ export interface ToolResult {
   isError?: boolean;
 }
 
+/**
+ * A single round-trip of (assistant-requested calls → caller-supplied results).
+ * Used to preserve the FULL multi-turn tool-use history across provider
+ * invocations so OpenAI's contract (each `tool` message must follow its
+ * matching `assistant.tool_calls`) is never violated by dropping earlier
+ * pairs. Claude and Gemini also iterate these turns so their transcript
+ * stays consistent with the real conversation.
+ */
+export interface ToolTurn {
+  toolCalls: ToolCall[];
+  toolResults: ToolResult[];
+}
+
 export interface SendMessageWithToolsOptions {
   systemPrompt: string;
   history: Message[];
   userMessage: string;
   tools: ToolSpec[];
   /**
-   * When set, these tool results are appended after `userMessage` as the
-   * latest turn so the model can continue from where it requested tools.
+   * Full ordered history of previous (assistant-tool_calls → tool-results)
+   * pairs for this conversation. Providers replay these in order so no pair
+   * is ever dropped — required for OpenAI's strict tool-message ordering.
+   */
+  priorToolTurns?: ToolTurn[];
+  /**
+   * @deprecated Use priorToolTurns. Kept for back-compat with a single
+   * pending turn: equivalent to one ToolTurn appended at the end.
    */
   toolResults?: ToolResult[];
-  /**
-   * Previously-issued tool calls being answered in `toolResults`. Providers
-   * that require a matching assistant turn (Anthropic, OpenAI) use these.
-   */
+  /** @deprecated Use priorToolTurns. */
   priorToolCalls?: ToolCall[];
   maxOutputTokens?: number;
 }

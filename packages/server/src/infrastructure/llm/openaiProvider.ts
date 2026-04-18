@@ -118,24 +118,41 @@ export function createOpenAiProvider(options: OpenAiProviderOptions): LlmProvide
         ...opts.history.map(toOpenAiMessage),
         { role: "user", content: opts.userMessage },
       ];
-      if (opts.priorToolCalls && opts.priorToolCalls.length > 0) {
-        messages.push({
-          role: "assistant",
-          content: null,
-          tool_calls: opts.priorToolCalls.map((c) => ({
-            id: c.id,
-            type: "function",
-            function: { name: c.name, arguments: JSON.stringify(c.arguments) },
-          })),
-        });
+      // Replay every prior (assistant-tool_calls → tool-results) pair in
+      // order. OpenAI requires every `tool` message to follow its matching
+      // `assistant.tool_calls`; dropping earlier pairs in a multi-turn
+      // conversation produces a 400 from the API.
+      const turns: Array<{ toolCalls: typeof opts.priorToolCalls; toolResults: typeof opts.toolResults }> = [];
+      if (opts.priorToolTurns && opts.priorToolTurns.length > 0) {
+        for (const t of opts.priorToolTurns) {
+          turns.push({ toolCalls: t.toolCalls, toolResults: t.toolResults });
+        }
+      } else if (
+        (opts.priorToolCalls && opts.priorToolCalls.length > 0) ||
+        (opts.toolResults && opts.toolResults.length > 0)
+      ) {
+        turns.push({ toolCalls: opts.priorToolCalls, toolResults: opts.toolResults });
       }
-      if (opts.toolResults && opts.toolResults.length > 0) {
-        for (const r of opts.toolResults) {
+      for (const t of turns) {
+        if (t.toolCalls && t.toolCalls.length > 0) {
           messages.push({
-            role: "tool",
-            tool_call_id: r.toolCallId,
-            content: r.content,
+            role: "assistant",
+            content: null,
+            tool_calls: t.toolCalls.map((c) => ({
+              id: c.id,
+              type: "function",
+              function: { name: c.name, arguments: JSON.stringify(c.arguments) },
+            })),
           });
+        }
+        if (t.toolResults && t.toolResults.length > 0) {
+          for (const r of t.toolResults) {
+            messages.push({
+              role: "tool",
+              tool_call_id: r.toolCallId,
+              content: r.content,
+            });
+          }
         }
       }
 

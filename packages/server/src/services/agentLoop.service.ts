@@ -4,8 +4,8 @@ import type { GithubMcpClient } from "../infrastructure/githubClient.js";
 import type {
   LlmProvider,
   Message,
-  ToolCall,
   ToolResult,
+  ToolTurn,
   TokenUsage,
 } from "../infrastructure/llm/types.js";
 import type { RepoMapRepository } from "../repositories/repoMap.repository.js";
@@ -127,8 +127,12 @@ export function createAgentLoop(deps: AgentLoopDeps): {
       let totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
       let totalCost = 0;
 
-      let priorToolCalls: ToolCall[] | undefined;
-      let toolResults: ToolResult[] | undefined;
+      // Accumulated (assistant tool_calls → caller-supplied tool_results)
+      // pairs. Sent in full on every subsequent turn so OpenAI's strict
+      // "tool message must follow its assistant.tool_calls" contract is
+      // preserved; Claude/Gemini replay these too so the transcript matches
+      // reality.
+      const priorToolTurns: ToolTurn[] = [];
       let finalAnswer = "";
       let capReached = false;
 
@@ -138,8 +142,7 @@ export function createAgentLoop(deps: AgentLoopDeps): {
           history: input.history,
           userMessage: input.userMessage,
           tools: toolSpecs,
-          ...(priorToolCalls ? { priorToolCalls } : {}),
-          ...(toolResults ? { toolResults } : {}),
+          ...(priorToolTurns.length > 0 ? { priorToolTurns } : {}),
         });
 
         totalUsage = {
@@ -241,8 +244,10 @@ export function createAgentLoop(deps: AgentLoopDeps): {
           }
         }
 
-        priorToolCalls = response.toolCalls;
-        toolResults = nextResults;
+        priorToolTurns.push({
+          toolCalls: response.toolCalls,
+          toolResults: nextResults,
+        });
 
         if (capReached) {
           // loop once more so the model can close out with the partial marker
