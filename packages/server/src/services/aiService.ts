@@ -1,5 +1,5 @@
 import type { Tenant } from "../config/tenants.js";
-import type { GithubMcpClient, SearchHit } from "../infrastructure/githubMcp.js";
+import type { GithubMcpClient, SearchHit } from "../infrastructure/githubClient.js";
 import type { LlmFactory } from "../infrastructure/llm/llmFactory.js";
 import type { Message } from "../infrastructure/llm/types.js";
 import type { AnalyticsRepository } from "../repositories/analytics.repository.js";

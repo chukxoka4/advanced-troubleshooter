@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Tenant } from "../config/tenants.js";
-import type { GithubMcpClient } from "../infrastructure/githubMcp.js";
+import type { GithubMcpClient } from "../infrastructure/githubClient.js";
 import type { LlmFactory } from "../infrastructure/llm/llmFactory.js";
 import type { LlmProvider, SendMessageOptions } from "../infrastructure/llm/types.js";
 import type { AnalyticsRepository } from "../repositories/analytics.repository.js";

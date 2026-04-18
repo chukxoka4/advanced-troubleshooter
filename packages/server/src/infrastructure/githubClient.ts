@@ -29,6 +29,28 @@ export interface FileContents {
   content: string;
 }
 
+export interface RepoMeta {
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  headSha: string;
+}
+
+export interface DirEntry {
+  path: string;
+  type: "file" | "dir";
+  size?: number;
+}
+
+export interface FileRange {
+  repo: string;
+  path: string;
+  ref: string;
+  startLine: number;
+  endLine: number;
+  content: string;
+}
+
 export interface GithubMcpClient {
   searchFiles(
     query: string,
@@ -37,7 +59,20 @@ export interface GithubMcpClient {
     options?: { limit?: number },
   ): Promise<SearchHit[]>;
   readFile(repo: RepoRef, path: string, token: string): Promise<FileContents>;
+  getRepo(repo: RepoRef, token: string): Promise<RepoMeta>;
+  listDir(repo: RepoRef, path: string, token: string): Promise<DirEntry[]>;
+  getCommitSha(repo: RepoRef, token: string, ref?: string): Promise<string>;
+  readFileRange(
+    repo: RepoRef,
+    path: string,
+    startLine: number,
+    endLine: number,
+    token: string,
+  ): Promise<FileRange>;
 }
+
+// Back-compat alias: the client used to live in `githubMcp.ts`.
+export type GithubClient = GithubMcpClient;
 
 export interface GithubMcpOptions {
   baseUrl?: string;
@@ -170,6 +205,78 @@ export function createGithubMcpClient(options: GithubMcpOptions = {}): GithubMcp
       }
       const content = Buffer.from(body.content, "base64").toString("utf8");
       return { repo: `${repo.owner}/${repo.name}`, path, ref, content };
+    },
+
+    async getRepo(repo, token) {
+      requireToken(token);
+      const url = `${baseUrl}/repos/${repo.owner}/${repo.name}`;
+      const body = (await githubGet(url, token, fetchImpl, userAgent)) as {
+        default_branch?: string;
+      };
+      const defaultBranch = typeof body.default_branch === "string" ? body.default_branch : "main";
+      const headSha = await this.getCommitSha({ ...repo, defaultBranch }, token, defaultBranch);
+      return { owner: repo.owner, name: repo.name, defaultBranch, headSha };
+    },
+
+    async listDir(repo, path, token) {
+      requireToken(token);
+      const ref = repo.defaultBranch ?? "main";
+      const safePath = path
+        .split("/")
+        .filter((p) => p.length > 0)
+        .map(encodeURIComponent)
+        .join("/");
+      const suffix = safePath.length > 0 ? `/${safePath}` : "";
+      const url = `${baseUrl}/repos/${repo.owner}/${repo.name}/contents${suffix}?ref=${encodeURIComponent(ref)}`;
+      const body = (await githubGet(url, token, fetchImpl, userAgent)) as
+        | Array<{ path?: string; type?: string; size?: number }>
+        | { path?: string; type?: string };
+      if (!Array.isArray(body)) {
+        // listDir on a file → return a single entry so callers can uniformly treat the result
+        if (typeof body.path === "string" && (body.type === "file" || body.type === "dir")) {
+          return [{ path: body.path, type: body.type }];
+        }
+        return [];
+      }
+      return body
+        .filter(
+          (i): i is { path: string; type: "file" | "dir"; size?: number } =>
+            typeof i.path === "string" && (i.type === "file" || i.type === "dir"),
+        )
+        .map((i) => {
+          const entry: DirEntry = { path: i.path, type: i.type };
+          if (typeof i.size === "number") entry.size = i.size;
+          return entry;
+        });
+    },
+
+    async getCommitSha(repo, token, ref) {
+      requireToken(token);
+      const branch = ref ?? repo.defaultBranch ?? "main";
+      const url = `${baseUrl}/repos/${repo.owner}/${repo.name}/commits/${encodeURIComponent(branch)}`;
+      const body = (await githubGet(url, token, fetchImpl, userAgent)) as { sha?: string };
+      if (typeof body.sha !== "string" || body.sha.length === 0) {
+        throw new Error(`github commit sha missing for ${repo.owner}/${repo.name}@${branch}`);
+      }
+      return body.sha;
+    },
+
+    async readFileRange(repo, path, startLine, endLine, token) {
+      const file = await this.readFile(repo, path, token);
+      const lines = file.content.split(/\r?\n/);
+      const total = lines.length;
+      // clamp to [1, total]
+      const s = Math.max(1, Math.min(startLine, total));
+      const e = Math.max(s, Math.min(endLine, total));
+      const slice = lines.slice(s - 1, e).join("\n");
+      return {
+        repo: file.repo,
+        path: file.path,
+        ref: file.ref,
+        startLine: s,
+        endLine: e,
+        content: slice,
+      };
     },
   };
 }

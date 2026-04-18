@@ -10,7 +10,7 @@ import {
   registerGlobalErrorHandler,
   registerProtectedMiddleware,
 } from "./middleware/register.js";
-import { createGithubMcpClient } from "./infrastructure/githubMcp.js";
+import { createGithubMcpClient } from "./infrastructure/githubClient.js";
 import { createLlmFactory } from "./infrastructure/llm/llmFactory.js";
 import { createAnalyticsRepository } from "./repositories/analytics.repository.js";
 import { createApiKeyRepository } from "./repositories/apiKey.repository.js";

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createGithubMcpClient, toSearchQuery } from "./githubMcp.js";
+import { createGithubMcpClient, toSearchQuery } from "./githubClient.js";
 
 function jsonResponse(body: unknown, init: Partial<ResponseInit> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -104,6 +104,94 @@ describe("githubMcp client", () => {
     const hits = await client.searchFiles("?? () // a of", repo, "tok");
     expect(hits).toEqual([]);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("getRepo returns metadata plus head SHA from the default branch", async () => {
+    const fetchImpl = vi.fn();
+    fetchImpl
+      .mockResolvedValueOnce(jsonResponse({ default_branch: "trunk" }))
+      .mockResolvedValueOnce(jsonResponse({ sha: "abc123" }));
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const meta = await client.getRepo({ owner: "awesomemotive", name: "wpforms" }, "tok");
+    expect(meta).toEqual({
+      owner: "awesomemotive",
+      name: "wpforms",
+      defaultBranch: "trunk",
+      headSha: "abc123",
+    });
+    const [firstUrl] = fetchImpl.mock.calls[0] as [string];
+    expect(firstUrl).toContain("/repos/awesomemotive/wpforms");
+    const [secondUrl] = fetchImpl.mock.calls[1] as [string];
+    expect(secondUrl).toContain("/commits/trunk");
+  });
+
+  it("listDir returns entries from the contents endpoint", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse([
+        { path: "src/index.ts", type: "file", size: 120 },
+        { path: "src/sub", type: "dir" },
+        { path: "README.md", type: "file", size: 10 },
+      ]),
+    );
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const entries = await client.listDir(repo, "src", "tok");
+    expect(entries).toHaveLength(3);
+    expect(entries[0]).toMatchObject({ path: "src/index.ts", type: "file", size: 120 });
+    const [url] = fetchImpl.mock.calls[0] as [string];
+    expect(url).toContain("/repos/awesomemotive/wpforms/contents/src");
+    expect(url).toContain("ref=trunk");
+  });
+
+  it("listDir with empty path lists the repo root", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse([]));
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await client.listDir(repo, "", "tok");
+    const [url] = fetchImpl.mock.calls[0] as [string];
+    expect(url).toContain("/repos/awesomemotive/wpforms/contents?ref=trunk");
+  });
+
+  it("getCommitSha resolves a branch to a SHA", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ sha: "deadbeef" }));
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const sha = await client.getCommitSha(repo, "tok");
+    expect(sha).toBe("deadbeef");
+    const [url] = fetchImpl.mock.calls[0] as [string];
+    expect(url).toContain("/commits/trunk");
+  });
+
+  it("getCommitSha throws if GitHub returns no sha", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}));
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.getCommitSha(repo, "tok")).rejects.toThrow(/sha missing/);
+  });
+
+  it("readFileRange clamps start/end to the file length", async () => {
+    const body = "line1\nline2\nline3\nline4\nline5";
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from(body, "utf8").toString("base64"),
+      }),
+    );
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    const slice = await client.readFileRange(repo, "x.ts", 2, 4, "tok");
+    expect(slice.content).toBe("line2\nline3\nline4");
+    expect(slice.startLine).toBe(2);
+    expect(slice.endLine).toBe(4);
+
+    const clampedHigh = await client.readFileRange(repo, "x.ts", 3, 999, "tok");
+    expect(clampedHigh.endLine).toBe(5);
+    expect(clampedHigh.content).toBe("line3\nline4\nline5");
+
+    const clampedLow = await client.readFileRange(repo, "x.ts", -5, 2, "tok");
+    expect(clampedLow.startLine).toBe(1);
+    expect(clampedLow.content).toBe("line1\nline2");
+
+    const inverted = await client.readFileRange(repo, "x.ts", 4, 1, "tok");
+    expect(inverted.startLine).toBe(4);
+    expect(inverted.endLine).toBe(4);
   });
 
   it("searchFiles sanitises the raw question before hitting GitHub — regression for the 422 produced by the Phase 1 milestone question", async () => {
