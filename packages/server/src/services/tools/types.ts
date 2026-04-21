@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 import type { Tenant } from "../../config/tenants.js";
 import type { GithubMcpClient } from "../../infrastructure/githubClient.js";
 import type { RepoMapRepository } from "../../repositories/repoMap.repository.js";
+import type { IssueCreateRateGate } from "../issueCreateRateGate.service.js";
 import type { TenantRepo } from "../repoScope.service.js";
 
 /**
@@ -18,6 +19,7 @@ export interface ToolContext {
   githubClient: GithubMcpClient;
   repoMapRepository: RepoMapRepository;
   logger: Pick<Logger, "info" | "warn" | "error" | "debug">;
+  issueCreateRateGate?: IssueCreateRateGate;
 }
 
 export interface ToolDefinition<TArgs = Record<string, unknown>> {

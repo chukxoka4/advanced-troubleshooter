@@ -13,6 +13,7 @@ import type { RepoMapRepository } from "../repositories/repoMap.repository.js";
 import type { AgentLoopToolCallRecord } from "./agentLoop.service.js";
 import { createAgentLoop } from "./agentLoop.service.js";
 import { buildDefaultAgentTools } from "./defaultAgentTools.js";
+import { createIssueCreateRateGate } from "./issueCreateRateGate.service.js";
 import type { RepoMapService } from "./repoMap.service.js";
 import { validate as validateRepoScope } from "./repoScope.service.js";
 
@@ -83,6 +84,7 @@ function reposTouchedFromLoop(
 export function createAiService(deps: AiServiceDeps): AiService {
   const now = deps.now ?? (() => Date.now());
   const historyLimit = deps.maxHistoryMessages ?? DEFAULT_HISTORY;
+  const issueCreateRateGate = createIssueCreateRateGate({ now });
 
   return {
     async askQuestion({ tenant, sessionId, question, repoScope }) {
@@ -122,6 +124,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         githubClient: deps.githubClient,
         repoMapRepository: deps.repoMapRepository,
         logger: rootLogger,
+        issueCreateRateGate,
       });
 
       const loopResult = await agentLoop.run({

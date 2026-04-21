@@ -26,7 +26,7 @@ export const searchIssuesTool: ToolDefinition<SearchIssuesArgs> = {
 
   async execute(args, ctx) {
     const cfg = ctx.tenant.issueConfig;
-    if (!cfg?.writeToken) {
+    if (!cfg?.targetRepo) {
       throw new ValidationError("issue search is not available");
     }
     if (typeof args.repo !== "string" || args.repo !== cfg.targetRepo) {

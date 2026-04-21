@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Tenant } from "../../config/tenants.js";
 import type { IssueCreator } from "../../infrastructure/issueCreator.js";
-import { buildDefaultAgentTools } from "../defaultAgentTools.js";
+import { RateLimitError } from "../../shared/errors/index.js";
+import { buildDefaultAgentTools, tenantHasIssueSearchTarget } from "../defaultAgentTools.js";
+import { createIssueCreateRateGate } from "../issueCreateRateGate.service.js";
 import type { TenantRepo } from "../repoScope.service.js";
 import type { ToolContext } from "./types.js";
 import { createCreateIssueTool } from "./createIssue.tool.js";
@@ -32,7 +34,11 @@ function makeTenant(overrides: Partial<Tenant> = {}): Tenant {
   } as Tenant;
 }
 
-function makeCtx(tenant: Tenant, allowed: TenantRepo[]): ToolContext {
+function makeCtx(
+  tenant: Tenant,
+  allowed: TenantRepo[],
+  issueCreateRateGate: ToolContext["issueCreateRateGate"] = { tryConsume: vi.fn() },
+): ToolContext {
   return {
     tenant,
     allowedRepos: allowed,
@@ -47,6 +53,7 @@ function makeCtx(tenant: Tenant, allowed: TenantRepo[]): ToolContext {
     },
     repoMapRepository: {} as ToolContext["repoMapRepository"],
     logger: silentLogger,
+    ...(issueCreateRateGate !== undefined ? { issueCreateRateGate } : {}),
   };
 }
 
@@ -73,23 +80,60 @@ describe("createCreateIssueTool", () => {
       ),
     ).rejects.toMatchObject({ message: "repo not in tenant scope" });
   });
+
+  it("applies issueCreateRateGate before issueCreator (issuesPerHour)", async () => {
+    const t0 = Date.UTC(2026, 2, 10, 8, 0, 0);
+    const now = vi.fn(() => t0);
+    const gate = createIssueCreateRateGate({ now });
+    const create = vi.fn(async () => ({ url: "https://gh/issue/1", number: 1 }));
+    const tool = createCreateIssueTool({ create });
+    const tenant = makeTenant({ rateLimits: { questionsPerMinute: 1, issuesPerHour: 1 } });
+    const ctx = makeCtx(tenant, [makeRepo()], gate);
+    await tool.execute({ repo: "acme/widgets", title: "a", body: "b" }, ctx);
+    await expect(tool.execute({ repo: "acme/widgets", title: "c", body: "d" }, ctx)).rejects.toBeInstanceOf(
+      RateLimitError,
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("buildDefaultAgentTools issue registration", () => {
   const noopCreator: IssueCreator = { create: vi.fn() };
 
-  it("omits issue tools when writeToken is absent", () => {
+  it("omits issue tools when there is no issue target on the tenant", () => {
     const names = buildDefaultAgentTools(
-      makeTenant({ issueConfig: { targetRepo: "acme/widgets" } }),
+      makeTenant({ issueConfig: undefined, repos: [makeRepo()] }),
       noopCreator,
     ).map((t) => t.name);
     expect(names).not.toContain("createIssue");
     expect(names).not.toContain("searchIssues");
   });
 
-  it("includes issue tools when writeToken is present", () => {
+  it("includes searchIssues when targetRepo maps to a repo but writeToken is absent", () => {
+    const names = buildDefaultAgentTools(
+      makeTenant({ issueConfig: { targetRepo: "acme/widgets" } }),
+      noopCreator,
+    ).map((t) => t.name);
+    expect(names).toContain("searchIssues");
+    expect(names).not.toContain("createIssue");
+  });
+
+  it("includes createIssue when writeToken is present", () => {
     const names = buildDefaultAgentTools(makeTenant(), noopCreator).map((t) => t.name);
     expect(names).toContain("createIssue");
     expect(names).toContain("searchIssues");
+  });
+});
+
+describe("tenantHasIssueSearchTarget", () => {
+  it("is false when target repo is not declared on the tenant", () => {
+    expect(
+      tenantHasIssueSearchTarget(
+        makeTenant({
+          repos: [makeRepo("other", "repo")],
+          issueConfig: { targetRepo: "acme/widgets" },
+        }),
+      ),
+    ).toBe(false);
   });
 });

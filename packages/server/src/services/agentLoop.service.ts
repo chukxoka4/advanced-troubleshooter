@@ -10,6 +10,7 @@ import type {
 } from "../infrastructure/llm/types.js";
 import type { RepoMapRepository } from "../repositories/repoMap.repository.js";
 import { ValidationError } from "../shared/errors/index.js";
+import type { IssueCreateRateGate } from "./issueCreateRateGate.service.js";
 import type { TenantRepo } from "./repoScope.service.js";
 import type { ToolContext, ToolDefinition } from "./tools/types.js";
 
@@ -75,6 +76,7 @@ export interface AgentLoopDeps {
   githubClient: GithubMcpClient;
   repoMapRepository: RepoMapRepository;
   logger: Pick<Logger, "info" | "warn" | "error" | "debug">;
+  issueCreateRateGate?: IssueCreateRateGate;
 }
 
 const DEFAULT_MAX_TURNS = 8;
@@ -123,6 +125,9 @@ export function createAgentLoop(deps: AgentLoopDeps): {
         repoMapRepository: deps.repoMapRepository,
         logger: deps.logger,
       };
+      if (deps.issueCreateRateGate !== undefined) {
+        ctx.issueCreateRateGate = deps.issueCreateRateGate;
+      }
 
       const toolSpecs = input.tools.map((t) => ({
         name: t.name,

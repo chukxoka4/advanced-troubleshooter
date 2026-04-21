@@ -21,7 +21,7 @@ function makeTenant(): Tenant {
     tenantId: "t",
     displayName: "T",
     repos: [makeRepo()],
-    issueConfig: { targetRepo: "acme/widgets", writeToken: "write" },
+    issueConfig: { targetRepo: "acme/widgets" },
     ai: { provider: "openai", model: "gpt-4o", apiKey: "sk", dailySpendCapUsd: 10 },
     systemPrompt: "s",
     allowedOrigins: [],

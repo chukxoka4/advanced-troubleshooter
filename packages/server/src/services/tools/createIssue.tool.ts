@@ -40,6 +40,7 @@ export function createCreateIssueTool(issueCreator: IssueCreator): ToolDefinitio
       if (typeof args.body !== "string") {
         throw new ValidationError("createIssue: body is required");
       }
+      ctx.issueCreateRateGate?.tryConsume(ctx.tenant);
       const labels = Array.isArray(args.labels)
         ? args.labels.filter((l): l is string => typeof l === "string")
         : undefined;
