@@ -51,6 +51,11 @@ export interface FileRange {
   content: string;
 }
 
+export interface IssueSearchHit {
+  title: string;
+  url: string;
+}
+
 export interface GithubMcpClient {
   searchFiles(
     query: string,
@@ -58,6 +63,16 @@ export interface GithubMcpClient {
     token: string,
     options?: { limit?: number },
   ): Promise<SearchHit[]>;
+  /**
+   * Search issues within a single repo (read token). Returns titles and
+   * URLs only — no bodies.
+   */
+  searchIssues(
+    repoFullName: string,
+    query: string,
+    token: string,
+    options?: { limit?: number },
+  ): Promise<IssueSearchHit[]>;
   readFile(repo: RepoRef, path: string, token: string): Promise<FileContents>;
   getRepo(repo: RepoRef, token: string): Promise<RepoMeta>;
   listDir(repo: RepoRef, path: string, token: string): Promise<DirEntry[]>;
@@ -186,6 +201,22 @@ export function createGithubMcpClient(options: GithubMcpOptions = {}): GithubMcp
           path: i.path as string,
           url: i.html_url as string,
         }));
+    },
+
+    async searchIssues(repoFullName, query, token, searchOptions = {}) {
+      requireToken(token);
+      const limit = Math.min(searchOptions.limit ?? 10, 100);
+      const safeQuery = toSearchQuery(query);
+      if (safeQuery.length === 0) return [];
+      const q = `repo:${repoFullName} is:issue ${safeQuery}`;
+      const url = `${baseUrl}/search/issues?q=${encodeURIComponent(q)}&per_page=${limit}`;
+      const body = (await githubGet(url, token, fetchImpl, userAgent)) as {
+        items?: Array<{ title?: string; html_url?: string }>;
+      };
+      const items = Array.isArray(body.items) ? body.items : [];
+      return items
+        .filter((i) => typeof i.title === "string" && typeof i.html_url === "string")
+        .map((i) => ({ title: i.title as string, url: i.html_url as string }));
     },
 
     async readFile(repo, path, token) {

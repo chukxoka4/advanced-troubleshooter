@@ -36,22 +36,35 @@ export async function registerChatRoute(
     if (!parseResult.success) {
       throw new ValidationError(parseResult.error.issues[0]?.message ?? "invalid chat request");
     }
-    const { sessionId, message } = parseResult.data;
+    const { sessionId, message, repoScope } = parseResult.data;
 
     const result = await deps.aiService.askQuestion({
       tenant,
       sessionId,
       question: message,
+      ...(repoScope !== undefined ? { repoScope } : {}),
     });
 
     const body: ChatResponse = {
       sessionId,
       answer: result.answer,
-      reposSearched: result.reposSearched,
+      reposScoped: result.reposScoped,
+      reposTouched: result.reposTouched,
       filesReferenced: result.filesReferenced.map((f) => {
-        const [repo, path] = f.split(/:(.+)/);
-        return { repo: repo ?? "", path: path ?? "" };
+        const m = /^([^:]+):([\s\S]+)$/.exec(f);
+        const repo = m?.[1] ?? "";
+        const path = m?.[2] ?? "";
+        return { repo, path };
       }),
+      ...(result.toolCalls.length > 0
+        ? {
+            toolCalls: result.toolCalls.map((c) => ({
+              name: c.name,
+              ok: c.ok,
+              ...(c.errorMessage !== undefined ? { errorMessage: c.errorMessage } : {}),
+            })),
+          }
+        : {}),
     };
     return reply.code(200).send(body);
   });

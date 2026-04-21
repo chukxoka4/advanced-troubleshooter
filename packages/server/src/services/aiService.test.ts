@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Tenant } from "../config/tenants.js";
 import type { GithubMcpClient } from "../infrastructure/githubClient.js";
+import type { IssueCreator } from "../infrastructure/issueCreator.js";
 import type { LlmFactory } from "../infrastructure/llm/llmFactory.js";
-import type { LlmProvider, SendMessageOptions } from "../infrastructure/llm/types.js";
+import type { LlmProvider, SendMessageWithToolsOptions } from "../infrastructure/llm/types.js";
 import type { AnalyticsRepository } from "../repositories/analytics.repository.js";
 import type { ConversationRepository } from "../repositories/conversation.repository.js";
+import type { RepoMapRepository } from "../repositories/repoMap.repository.js";
 import { createAiService } from "./aiService.js";
+import type { RepoMapService } from "./repoMap.service.js";
 
 function makeTenant(overrides: Partial<Tenant> = {}): Tenant {
   return {
@@ -35,7 +38,6 @@ function makeTenant(overrides: Partial<Tenant> = {}): Tenant {
 
 function makeDeps() {
   const calls: string[] = [];
-  const sentSystemPrompts: string[] = [];
   const conversationRepo: ConversationRepository = {
     getHistory: vi.fn(async () => {
       calls.push("getHistory");
@@ -60,41 +62,45 @@ function makeDeps() {
       calls.push("logEvent");
     }),
   };
-  const githubMcp: GithubMcpClient = {
-    searchFiles: vi.fn(async () => {
-      calls.push("search");
-      return [
-        { repo: "acme/widgets", path: "src/a.ts", url: "u" },
-      ];
+  const githubClient: GithubMcpClient = {
+    searchFiles: vi.fn(async () => []),
+    searchIssues: vi.fn(async () => []),
+    readFile: vi.fn(),
+    getRepo: vi.fn(),
+    listDir: vi.fn(),
+    getCommitSha: vi.fn(),
+    readFileRange: vi.fn(),
+  };
+  const repoMapService: RepoMapService = {
+    build: vi.fn(),
+    refresh: vi.fn(),
+    renderForScope: vi.fn(async () => {
+      calls.push("renderForScope");
+      return "## acme/widgets\n### src/a.ts\n- L1-2 function x: x";
     }),
-    readFile: vi.fn(async () => {
-      calls.push("read");
-      return {
-        repo: "acme/widgets",
-        path: "src/a.ts",
-        ref: "main",
-        content: "export const x = 1;",
-      };
-    }),
+  };
+  const repoMapRepository: RepoMapRepository = {
+    upsertMap: vi.fn(),
+    getMap: vi.fn(async () => null),
+    listMapsForTenant: vi.fn(async () => []),
+  };
+  const issueCreator: IssueCreator = {
+    create: vi.fn(async () => ({ url: "https://github.com/acme/widgets/issues/1", number: 1 })),
   };
   const provider: LlmProvider = {
     name: "claude",
     model: "claude-opus-4-7",
-    sendMessage: vi.fn(async (opts: SendMessageOptions) => {
-      calls.push("llm");
-      sentSystemPrompts.push(opts.systemPrompt);
-      return {
-        content: "answer",
-        usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
-        estimatedCostUsd: 0.01,
-      };
-    }),
+    sendMessage: vi.fn(async () => ({
+      content: "",
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      estimatedCostUsd: 0,
+    })),
     sendMessageWithTools: vi.fn(async () => ({
       content: "answer",
       toolCalls: [],
       stopReason: "end_turn" as const,
-      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      estimatedCostUsd: 0,
+      usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+      estimatedCostUsd: 0.01,
     })),
     getUsage: () => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 }),
     getSpendToday: () => 0,
@@ -103,58 +109,67 @@ function makeDeps() {
     getProvider: vi.fn(() => provider),
     clearCache: vi.fn(),
   };
-  return { calls, sentSystemPrompts, conversationRepo, analyticsRepo, githubMcp, llmFactory, provider };
+  return {
+    calls,
+    conversationRepo,
+    analyticsRepo,
+    githubClient,
+    repoMapService,
+    repoMapRepository,
+    issueCreator,
+    llmFactory,
+    provider,
+  };
 }
 
 describe("aiService.askQuestion", () => {
-  it("orchestrates history → search → read → save(agent) → llm → save(assistant) → log", async () => {
+  it("orchestrates scope → history → map render → save(agent) → agent loop → save(assistant) → analytics", async () => {
     const deps = makeDeps();
     const service = createAiService(deps);
     const result = await service.askQuestion({
       tenant: makeTenant(),
-      sessionId: "s1",
+      sessionId: "550e8400-e29b-41d4-a716-446655440000",
       question: "how does x work?",
     });
 
     expect(result.answer).toBe("answer");
-    expect(result.reposSearched).toEqual(["acme/widgets"]);
-    expect(result.filesReferenced).toEqual(["acme/widgets:src/a.ts"]);
-    expect(deps.calls).toEqual([
-      "getHistory",
-      "search",
-      "read",
-      "saveMessage:agent",
-      "llm",
-      "saveMessage:assistant",
-      "logEvent",
-    ]);
+    expect(result.reposScoped).toEqual(["acme/widgets"]);
+    expect(result.reposTouched).toEqual([]);
+    expect(result.filesReferenced).toEqual([]);
+    expect(deps.calls).toEqual(["getHistory", "renderForScope", "saveMessage:agent", "saveMessage:assistant", "logEvent"]);
   });
 
-  it("passes the tenant systemPrompt through the LLM system parameter (never in user text)", async () => {
+  it("threads tenant systemPrompt into the agent loop system slot (not user text)", async () => {
     const deps = makeDeps();
     const service = createAiService(deps);
     await service.askQuestion({
       tenant: makeTenant({ systemPrompt: "TENANT_SYSTEM_XYZ" }),
-      sessionId: "s1",
+      sessionId: "550e8400-e29b-41d4-a716-446655440000",
       question: "hi",
     });
-    expect(deps.sentSystemPrompts[0]).toMatch(/TENANT_SYSTEM_XYZ/);
-    const llmCall = (deps.provider.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as SendMessageOptions;
+    const llmCall = (deps.provider.sendMessageWithTools as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0] as SendMessageWithToolsOptions;
+    expect(llmCall.systemPrompt).toMatch(/TENANT_SYSTEM_XYZ/);
     expect(llmCall.userMessage).toBe("hi");
     expect(llmCall.userMessage).not.toMatch(/TENANT_SYSTEM_XYZ/);
   });
 
   it("propagates LLM errors and does not save an assistant message", async () => {
     const deps = makeDeps();
-    (deps.provider.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (deps.provider.sendMessageWithTools as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("provider down"),
     );
     const service = createAiService(deps);
     await expect(
-      service.askQuestion({ tenant: makeTenant(), sessionId: "s1", question: "q" }),
+      service.askQuestion({
+        tenant: makeTenant(),
+        sessionId: "550e8400-e29b-41d4-a716-446655440000",
+        question: "q",
+      }),
     ).rejects.toThrow(/provider down/);
-    const roles = (deps.conversationRepo.saveMessage as ReturnType<typeof vi.fn>).mock.calls
-      .map((c) => (c[0] as { role: string }).role);
+    const roles = (deps.conversationRepo.saveMessage as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => (c[0] as { role: string }).role,
+    );
     expect(roles).toEqual(["agent"]);
     expect((deps.analyticsRepo.logEvent as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
   });
@@ -163,50 +178,44 @@ describe("aiService.askQuestion", () => {
     const deps = makeDeps();
     const service = createAiService(deps);
     await expect(
-      service.askQuestion({ tenant: makeTenant(), sessionId: "s1", question: "   " }),
+      service.askQuestion({
+        tenant: makeTenant(),
+        sessionId: "550e8400-e29b-41d4-a716-446655440000",
+        question: "   ",
+      }),
     ).rejects.toThrow(/question is required/);
   });
 
-  it("records analytics with provider name in metadata", async () => {
+  it("records analytics including toolCallCount and reposScoped metadata", async () => {
     const deps = makeDeps();
     const service = createAiService(deps);
-    await service.askQuestion({ tenant: makeTenant(), sessionId: "s1", question: "q" });
+    await service.askQuestion({
+      tenant: makeTenant(),
+      sessionId: "550e8400-e29b-41d4-a716-446655440000",
+      question: "q",
+    });
     const logArgs = (deps.analyticsRepo.logEvent as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(logArgs.eventType).toBe("query");
-    expect(logArgs.reposCount).toBe(1);
-    expect(logArgs.metadata.provider).toBe("claude");
+    expect(logArgs.metadata.toolCallCount).toBe(0);
+    expect(logArgs.metadata.reposScoped).toEqual(["acme/widgets"]);
   });
 
-  it("completes with empty reposSearched/filesReferenced when every search returns no hits", async () => {
-    // Reproduces the common real-world case where GitHub's code-search
-    // index has not covered a tenant's repos (selective indexing for
-    // low-activity accounts). The service must still hand a valid
-    // response back to the route layer rather than throwing — the LLM
-    // will answer with whatever context the system prompt alone provides.
-    const deps = makeDeps();
-    (deps.githubMcp.searchFiles as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    const service = createAiService(deps);
-
-    const result = await service.askQuestion({
-      tenant: makeTenant(),
-      sessionId: "s1",
-      question: "anything",
+  it("passes explicit repoScope into the scope gate", async () => {
+    const tenant = makeTenant({
+      repos: [
+        { owner: "a", name: "x", githubToken: "t1", defaultBranch: "main" },
+        { owner: "b", name: "y", githubToken: "t2", defaultBranch: "main" },
+      ],
     });
-
-    expect(result.reposSearched).toEqual([]);
-    expect(result.filesReferenced).toEqual([]);
-    expect(result.answer).toBe("answer");
-    // The empty-grounding path must: still hit search (exactly once per
-    // tenant repo), never read any file, still produce an LLM call, still
-    // persist agent+assistant messages, and still log exactly one
-    // analytics event. Empty hits is a valid state, not an error state.
-    expect(deps.githubMcp.searchFiles).toHaveBeenCalledTimes(1);
-    expect(deps.githubMcp.readFile).not.toHaveBeenCalled();
-    expect(deps.provider.sendMessage).toHaveBeenCalledTimes(1);
-    expect(deps.conversationRepo.saveMessage).toHaveBeenCalledTimes(2);
-    const savedRoles = (deps.conversationRepo.saveMessage as ReturnType<typeof vi.fn>)
-      .mock.calls.map((c) => (c[0] as { role: string }).role);
-    expect(savedRoles).toEqual(["agent", "assistant"]);
-    expect(deps.analyticsRepo.logEvent).toHaveBeenCalledTimes(1);
+    const deps = makeDeps();
+    const service = createAiService(deps);
+    const result = await service.askQuestion({
+      tenant,
+      sessionId: "550e8400-e29b-41d4-a716-446655440000",
+      question: "q",
+      repoScope: ["b/y"],
+    });
+    expect(result.reposScoped).toEqual(["b/y"]);
+    expect(deps.repoMapService.renderForScope).toHaveBeenCalledWith(tenant, ["b/y"]);
   });
 });

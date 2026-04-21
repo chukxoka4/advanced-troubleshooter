@@ -231,6 +231,32 @@ describe("githubMcp client", () => {
     // sanitisation only runs on the raw user query, never on our suffix.
     expect(qualifierPortion).toBe(" repo:awesomemotive/wpforms");
   });
+
+  it("searchIssues hits /search/issues with repo + is:issue scope and Bearer auth", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        items: [{ title: "Slow", html_url: "https://github.com/awesomemotive/wpforms/issues/1" }],
+      }),
+    );
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const hits = await client.searchIssues("awesomemotive/wpforms", "slow bug", "ghp_token", {
+      limit: 5,
+    });
+    expect(hits).toEqual([{ title: "Slow", url: "https://github.com/awesomemotive/wpforms/issues/1" }]);
+    const [calledUrl, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toContain("/search/issues?q=");
+    expect(decodeURIComponent(calledUrl)).toContain("repo:awesomemotive/wpforms");
+    expect(decodeURIComponent(calledUrl)).toContain("is:issue");
+    expect(calledUrl).toContain("per_page=5");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer ghp_token");
+  });
+
+  it("searchIssues skips GitHub when the sanitised query is empty", async () => {
+    const fetchImpl = vi.fn();
+    const client = createGithubMcpClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(client.searchIssues("awesomemotive/wpforms", "???", "tok")).resolves.toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe("toSearchQuery", () => {

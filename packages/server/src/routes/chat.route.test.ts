@@ -5,7 +5,7 @@ import type { LoadedTenants } from "../config/tenants.js";
 import { registerAuth } from "../middleware/auth.js";
 import { registerErrorHandler } from "../middleware/errorHandler.js";
 import { registerTenantResolver } from "../middleware/tenantResolver.js";
-import { NotFoundError } from "../shared/errors/index.js";
+import { NotFoundError, ValidationError } from "../shared/errors/index.js";
 import type { AiService } from "../services/aiService.js";
 import { registerChatRoute } from "./chat.js";
 
@@ -65,15 +65,22 @@ async function buildApp(
 
 function makeAiService(): AiService {
   return {
-    askQuestion: vi.fn(async ({ sessionId, question }) => ({
-      answer: `echo:${question}`,
-      reposSearched: ["acme/widgets"],
-      filesReferenced: ["acme/widgets:src/a.ts"],
-      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-      estimatedCostUsd: 0,
-      _sessionId: sessionId,
-    })) as unknown as AiService["askQuestion"],
-  };
+    askQuestion: vi.fn(async ({ sessionId, question, repoScope }) => {
+      if (repoScope?.includes("evil/other")) {
+        throw new ValidationError("repo not in tenant scope");
+      }
+      return {
+        answer: `echo:${question}`,
+        reposScoped: ["acme/widgets"],
+        reposTouched: ["acme/widgets"],
+        filesReferenced: ["acme/widgets:src/a.ts"],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        estimatedCostUsd: 0,
+        toolCalls: [],
+        _sessionId: sessionId,
+      };
+    }),
+  } as unknown as AiService;
 }
 
 describe("POST /api/v1/chat", () => {
@@ -152,12 +159,13 @@ describe("POST /api/v1/chat", () => {
       const body = res.json();
       expect(body.sessionId).toBe(VALID_UUID);
       expect(body.answer).toBe("echo:how do widgets work?");
-      expect(body.filesReferenced).toEqual([
-        { repo: "acme/widgets", path: "src/a.ts" },
-      ]);
+      expect(body.reposScoped).toEqual(["acme/widgets"]);
+      expect(body.reposTouched).toEqual(["acme/widgets"]);
+      expect(body.filesReferenced).toEqual([{ repo: "acme/widgets", path: "src/a.ts" }]);
       const askCall = (service.askQuestion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
       expect(askCall.tenant.tenantId).toBe("team-alpha");
       expect(askCall.sessionId).toBe(VALID_UUID);
+      expect(askCall.repoScope).toBeUndefined();
     } finally {
       await app.close();
     }
@@ -176,6 +184,43 @@ describe("POST /api/v1/chat", () => {
       expect(res.statusCode).toBe(200);
       const askCall = (service.askQuestion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
       expect(askCall.tenant.tenantId).toBe("team-alpha");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("forwards repoScope in the body to aiService", async () => {
+    const service = makeAiService();
+    const app = await buildApp(service);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/chat",
+        headers: { authorization: "Bearer good-key", "x-tenant-id": "team-alpha" },
+        payload: { sessionId: VALID_UUID, message: "hi", repoScope: ["acme/widgets"] },
+      });
+      expect(res.statusCode).toBe(200);
+      const askCall = (service.askQuestion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+      expect(askCall.repoScope).toEqual(["acme/widgets"]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns 400 when aiService rejects repo scope without echoing the repo name", async () => {
+    const service = makeAiService();
+    const app = await buildApp(service);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/chat",
+        headers: { authorization: "Bearer good-key", "x-tenant-id": "team-alpha" },
+        payload: { sessionId: VALID_UUID, message: "hi", repoScope: ["evil/other"] },
+      });
+      expect(res.statusCode).toBe(400);
+      const body = res.json() as { message: string };
+      expect(body.message).toBe("repo not in tenant scope");
+      expect(JSON.stringify(body)).not.toMatch(/evil/);
     } finally {
       await app.close();
     }

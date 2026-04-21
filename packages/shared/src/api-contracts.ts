@@ -29,25 +29,54 @@ export type HealthResponse = z.infer<typeof HealthResponseSchema>;
  * travels in the X-Tenant-Id header and is resolved by middleware, so
  * clients cannot spoof a different tenant through the request payload.
  */
+const REPO_FULL_NAME = /^[^/]+\/[^/]+$/;
+
 export const ChatRequestSchema = z.object({
   sessionId: z.string().uuid("sessionId must be a UUIDv4"),
   message: z
     .string()
     .min(1, "message is required")
     .max(4_000, "message must be at most 4000 characters"),
+  repoScope: z
+    .array(z.string().regex(REPO_FULL_NAME, "each repoScope entry must be owner/name"))
+    .optional(),
 });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
 export const ChatCitationSchema = z.object({
   repo: z.string(),
   path: z.string(),
+  lineStart: z.number().int().positive().optional(),
+  lineEnd: z.number().int().positive().optional(),
 });
 export type ChatCitation = z.infer<typeof ChatCitationSchema>;
+
+export const ChatToolCallSchema = z.object({
+  name: z.string(),
+  ok: z.boolean(),
+  errorMessage: z.string().optional(),
+});
+export type ChatToolCall = z.infer<typeof ChatToolCallSchema>;
 
 export const ChatResponseSchema = z.object({
   sessionId: z.string().uuid(),
   answer: z.string(),
-  reposSearched: z.array(z.string()),
+  reposScoped: z.array(z.string()),
+  reposTouched: z.array(z.string()),
   filesReferenced: z.array(ChatCitationSchema),
+  toolCalls: z.array(ChatToolCallSchema).optional(),
 });
 export type ChatResponse = z.infer<typeof ChatResponseSchema>;
+
+export const TenantRepoEntrySchema = z.object({
+  owner: z.string(),
+  name: z.string(),
+  fullName: z.string(),
+  isDefault: z.boolean(),
+});
+export type TenantRepoEntry = z.infer<typeof TenantRepoEntrySchema>;
+
+export const TenantReposResponseSchema = z.object({
+  repos: z.array(TenantRepoEntrySchema),
+});
+export type TenantReposResponse = z.infer<typeof TenantReposResponseSchema>;

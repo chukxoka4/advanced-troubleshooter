@@ -11,14 +11,18 @@ import {
   registerProtectedMiddleware,
 } from "./middleware/register.js";
 import { createGithubMcpClient } from "./infrastructure/githubClient.js";
+import { createIssueCreator } from "./infrastructure/issueCreator.js";
 import { createLlmFactory } from "./infrastructure/llm/llmFactory.js";
 import { createAnalyticsRepository } from "./repositories/analytics.repository.js";
 import { createApiKeyRepository } from "./repositories/apiKey.repository.js";
 import { createConversationRepository } from "./repositories/conversation.repository.js";
-import { createAiService } from "./services/aiService.js";
-import { createApiKeyService } from "./services/apiKeyService.js";
+import { createRepoMapRepository } from "./repositories/repoMap.repository.js";
 import { registerChatRoute } from "./routes/chat.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerTenantReposRoute } from "./routes/tenantRepos.js";
+import { createAiService } from "./services/aiService.js";
+import { createApiKeyService } from "./services/apiKeyService.js";
+import { createRepoMapService } from "./services/repoMap.service.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -57,11 +61,20 @@ async function main(): Promise<void> {
   });
   const githubMcp = createGithubMcpClient();
   const llmFactory = createLlmFactory();
+  const repoMapRepository = createRepoMapRepository(db);
+  const repoMapService = createRepoMapService({
+    githubClient: githubMcp,
+    repoMapRepository,
+  });
+  const issueCreator = createIssueCreator();
   const aiService = createAiService({
     conversationRepo,
     analyticsRepo,
-    githubMcp,
+    githubClient: githubMcp,
     llmFactory,
+    repoMapService,
+    repoMapRepository,
+    issueCreator,
   });
   const verifyApiKey = resolveVerifyApiKey(apiKeyService);
   const startedAt = Date.now();
@@ -77,7 +90,9 @@ async function main(): Promise<void> {
           "tenant.ai.apiKey",
           "*.ai.apiKey",
           "tenant.repos[*].githubToken",
+          "tenant.issueConfig.writeToken",
           "*.repos[*].githubToken",
+          "*.issueConfig.writeToken",
           "*.apiKey",
           "*.githubToken",
           "authorization",
@@ -108,6 +123,7 @@ async function main(): Promise<void> {
     async (protectedScope) => {
       await registerProtectedMiddleware(protectedScope, { tenants, verifyApiKey });
       await registerChatRoute(protectedScope, { aiService });
+      await registerTenantReposRoute(protectedScope);
     },
     { prefix: "/api/v1" },
   );
