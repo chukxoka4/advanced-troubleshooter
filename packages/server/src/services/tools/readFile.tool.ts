@@ -32,7 +32,7 @@ function looksBinary(content: string): boolean {
 export const readFileTool: ToolDefinition<ReadFileArgs> = {
   name: "readFile",
   description:
-    "Read a line range from a file inside one of the in-scope repositories. Returns the slice with its repo, path, and clamped line range.",
+    "Read UTF-8 text from a file inside an in-scope repository (repo = owner/name). Use this whenever the user names a path, asks to read/show/open a file, wants exact code, or line-by-line explanation—before summarising file contents. Returns the slice with repo, path, and clamped line range.",
   jsonSchema: {
     type: "object",
     additionalProperties: false,

@@ -114,6 +114,44 @@ describe("openaiProvider", () => {
     ]);
   });
 
+  it("sendMessageWithTools sets tool_choice required when opts.toolChoice is required", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: "c1",
+                  type: "function",
+                  function: { name: "readFile", arguments: "{}" },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+    );
+    const provider = createOpenAiProvider({
+      apiKey: "sk",
+      model: "gpt-4o",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [{ name: "readFile", description: "d", jsonSchema: { type: "object" } }],
+      toolChoice: "required",
+    });
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).tool_choice).toBe("required");
+  });
+
   it("sendMessageWithTools enforces spend cap", async () => {
     const fetchImpl = vi.fn(async () =>
       okResponse({

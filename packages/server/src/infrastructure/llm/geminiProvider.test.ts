@@ -101,6 +101,37 @@ describe("geminiProvider", () => {
     expect(result.toolCalls[0]).toMatchObject({ name: "readFile", arguments: { path: "a.ts" } });
   });
 
+  it("sendMessageWithTools sets functionCallingConfig ANY when opts.toolChoice is required", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        candidates: [
+          {
+            content: {
+              parts: [{ functionCall: { name: "readFile", args: {} } }],
+            },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }),
+    );
+    const provider = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini-1.5-pro",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [{ name: "readFile", description: "d", jsonSchema: { type: "object" } }],
+      toolChoice: "required",
+    });
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).toolConfig.functionCallingConfig.mode).toBe("ANY");
+  });
+
   it("sendMessageWithTools enforces spend cap", async () => {
     const fetchImpl = vi.fn(async () =>
       okResponse({

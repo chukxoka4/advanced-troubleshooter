@@ -135,6 +135,31 @@ describe("claudeProvider", () => {
     expect(result.content).toBe("thinking");
   });
 
+  it("sendMessageWithTools sets tool_choice any when opts.toolChoice is required", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        content: [{ type: "tool_use", id: "x", name: "readFile", input: {} }],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    const provider = createClaudeProvider({
+      apiKey: "sk",
+      model: "claude-sonnet-4-6",
+      dailySpendCapUsd: 10,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await provider.sendMessageWithTools({
+      systemPrompt: "s",
+      history: [],
+      userMessage: "u",
+      tools: [{ name: "readFile", description: "d", jsonSchema: { type: "object" } }],
+      toolChoice: "required",
+    });
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).tool_choice).toEqual({ type: "any" });
+  });
+
   it("sendMessageWithTools enforces spend cap", async () => {
     const fetchImpl = vi.fn(async () =>
       okResponse({

@@ -164,6 +164,7 @@ export function createOpenAiProvider(options: OpenAiProviderOptions): LlmProvide
           type: "function",
           function: { name: t.name, description: t.description, parameters: t.jsonSchema },
         })),
+        ...(opts.toolChoice === "required" ? { tool_choice: "required" } : {}),
       };
 
       const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {

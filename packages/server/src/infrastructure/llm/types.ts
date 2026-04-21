@@ -94,6 +94,12 @@ export interface SendMessageWithToolsOptions {
   /** @deprecated Use priorToolTurns. */
   priorToolCalls?: ToolCall[];
   maxOutputTokens?: number;
+  /**
+   * When set to "required", the provider must return at least one tool call
+   * for this request (first agent-loop turn only). Mapped per vendor in
+   * provider implementations.
+   */
+  toolChoice?: "required";
 }
 
 export interface ToolCallingResult {

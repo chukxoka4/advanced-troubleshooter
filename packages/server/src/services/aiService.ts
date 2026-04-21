@@ -16,6 +16,7 @@ import { buildDefaultAgentTools } from "./defaultAgentTools.js";
 import { createIssueCreateRateGate } from "./issueCreateRateGate.service.js";
 import type { RepoMapService } from "./repoMap.service.js";
 import { validate as validateRepoScope } from "./repoScope.service.js";
+import { userMessageWantsFileGrounding } from "./userMessageWantsFileGrounding.js";
 
 /**
  * Orchestrates chat: repo scope → conversation history → scoped repo-map
@@ -108,6 +109,11 @@ export function createAiService(deps: AiServiceDeps): AiService {
         mapBlock.length > 0
           ? mapBlock
           : "(no cached map rows for these repos — use searchCode, findSymbol, and readFile.)",
+        "---",
+        "Tool discipline: If the user names a repo file path, asks to read/show/open a file, wants line-by-line " +
+          "explanation of a file, or asks for exact code from a path, you MUST call readFile (repo = owner/name in scope, " +
+          "path = path in repo) before describing that file's contents. Never present fabricated source as if quoted from " +
+          "the repo; ground explanations in readFile (or findSymbol/searchCode) tool output.",
       ].join("\n\n");
 
       await deps.conversationRepo.saveMessage({
@@ -134,6 +140,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         systemPrompt,
         userMessage: question.trim(),
         tools: buildDefaultAgentTools(tenant, deps.issueCreator),
+        requireToolsFirstTurn: userMessageWantsFileGrounding(question),
       });
 
       const reposTouched = reposTouchedFromLoop(loopResult.toolCalls, loopResult.filesReferenced);

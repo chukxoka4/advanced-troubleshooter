@@ -170,6 +170,9 @@ export function createGeminiProvider(options: GeminiProviderOptions): LlmProvide
           },
         ],
         generationConfig: { maxOutputTokens: opts.maxOutputTokens ?? 1024 },
+        ...(opts.toolChoice === "required"
+          ? { toolConfig: { functionCallingConfig: { mode: "ANY" } } }
+          : {}),
       };
 
       const url = `${baseUrl}/v1beta/models/${encodeURIComponent(options.model)}:generateContent`;

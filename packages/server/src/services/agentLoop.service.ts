@@ -54,6 +54,12 @@ export interface AgentLoopRunInput {
    * wedging large token counts past the provider-daily-cap safety net.
    */
   maxCostUsd?: number;
+  /**
+   * When true and tools are non-empty, the first provider call forces at
+   * least one tool invocation so file-grounded questions do not complete
+   * with a text-only hallucination.
+   */
+  requireToolsFirstTurn?: boolean;
 }
 
 export interface AgentLoopToolCallRecord {
@@ -157,6 +163,9 @@ export function createAgentLoop(deps: AgentLoopDeps): {
           userMessage: input.userMessage,
           tools: toolSpecs,
           ...(priorToolTurns.length > 0 ? { priorToolTurns } : {}),
+          ...(turn === 0 && input.requireToolsFirstTurn === true && toolSpecs.length > 0
+            ? { toolChoice: "required" as const }
+            : {}),
         });
 
         totalUsage = {

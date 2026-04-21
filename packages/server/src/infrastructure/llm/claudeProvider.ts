@@ -171,6 +171,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions): LlmProvide
           description: t.description,
           input_schema: t.jsonSchema,
         })),
+        ...(opts.toolChoice === "required" ? { tool_choice: { type: "any" } } : {}),
       };
 
       const response = await fetchImpl(`${baseUrl}/v1/messages`, {
