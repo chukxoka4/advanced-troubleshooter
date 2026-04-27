@@ -17,8 +17,8 @@
     "migrate": "npm run migrate --workspace @advanced-troubleshooter/server"
   },
   "devDependencies": {
-    "eslint": "^9.39.1",
-    "typescript-eslint": "^8.58.2"
+    "eslint": "^10.2.1",
+    "typescript-eslint": "^8.59.0"
   },
   "engines": {
     "node": ">=20.0.0",
